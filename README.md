@@ -34,6 +34,8 @@ dotnet build
 # 产物：bin\Debug\net10.0-windows10.0.19041.0\Darius Music.exe
 ```
 
+不想自己编译就下现成的：[**Releases**](https://github.com/tuoersuo231/Darius-Music/releases) 里有 `DariusMusic-<版本>-win-x64.zip`，解压即用 —— 和内置更新源发布的是同一个包（哈希一致）。
+
 单文件式发布（framework-dependent，约 52 MB）：
 
 ```powershell
