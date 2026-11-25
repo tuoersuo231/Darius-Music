@@ -1,0 +1,94 @@
+<Window x:Class="CurrentLyrics.Views.AppearanceWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:controls="clr-namespace:CurrentLyrics.Controls"
+        Title="界面外观" Width="440" Height="610" MinWidth="360" MinHeight="420"
+        WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource WindowWashBrush}"
+        FontFamily="{StaticResource UiFont}"
+        Foreground="{DynamicResource TextBrush}"
+        Icon="/Assets/app.png">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Border BorderBrush="{DynamicResource HairlineBrush}" BorderThickness="0,0,0,1" Padding="26,22,26,12">
+            <TextBlock Text="界面外观" Style="{StaticResource H1}" />
+        </Border>
+
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Margin="20,14,14,16">
+            <StackPanel Margin="0,0,6,10">
+                <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="14" Padding="18,6" BorderBrush="{DynamicResource HairlineBrush}" BorderThickness="1">
+                    <StackPanel>
+                        
+                        <Grid Margin="0,12">
+                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                <TextBlock Text="背景色" FontSize="13" VerticalAlignment="Center" />
+                                <TextBlock x:Name="txtSurfaceHex" Text="#07080B" Style="{StaticResource Caption}" Margin="10,0,0,0" VerticalAlignment="Center" />
+                            </StackPanel>
+                            <Border x:Name="bdSurface" HorizontalAlignment="Right" Width="44" Height="26" CornerRadius="8" Cursor="Hand"
+                                    MouseLeftButtonUp="OnSurfaceSwatchClick" ToolTip="自定义颜色"
+                                    BorderBrush="#39425A" BorderThickness="1" Background="#07080B" />
+                        </Grid>
+                        <StackPanel Margin="0,12">
+                            <Grid>
+                                <TextBlock Text="背景不透明度" FontSize="13" />
+                                <TextBlock x:Name="txtThemeOpacity" Text="100%" HorizontalAlignment="Right" FontSize="12" Foreground="{DynamicResource AccentBrush}" />
+                            </Grid>
+                            <controls:DragOnlySlider x:Name="sldThemeOpacity" Style="{StaticResource ThinSlider}" Minimum="0" Maximum="100" Margin="0,8,0,0" />
+                        </StackPanel>
+                        <StackPanel Margin="0,12">
+                            <Grid>
+                                <TextBlock Text="背景磨砂" FontSize="13" />
+                                <TextBlock x:Name="txtThemeBlur" Text="0 px" HorizontalAlignment="Right" FontSize="12" Foreground="{DynamicResource AccentBrush}" />
+                            </Grid>
+                            <controls:DragOnlySlider x:Name="sldThemeBlur" Style="{StaticResource ThinSlider}" Minimum="0" Maximum="60" Margin="0,8,0,0" />
+                        </StackPanel>
+                        <StackPanel Margin="0,12,0,14">
+                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                <TextBlock Text="背景图" FontSize="13" VerticalAlignment="Center" />
+                                <TextBlock x:Name="txtThemeImage" Text="未设置" Style="{StaticResource Caption}" Margin="10,0,0,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" MaxWidth="190" />
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                                <Button x:Name="btnThemeCover" Content="当前歌曲封面" Style="{StaticResource GhostButton}" Padding="10,3" FontSize="12" Click="OnUseThemeCover" />
+                                <Button x:Name="btnThemeImage" Content="选择图片…" Style="{StaticResource GhostButton}" Padding="10,3" FontSize="12" Margin="8,0,0,0" Click="OnPickThemeImage" />
+                                <Button x:Name="btnThemeImageClear" Content="清除" Style="{StaticResource GhostButton}" Padding="10,3" FontSize="12" Margin="8,0,0,0" Click="OnClearThemeImage" />
+                            </StackPanel>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="14" Padding="18,14" BorderBrush="{DynamicResource HairlineBrush}" BorderThickness="1" Margin="0,12,0,0">
+                    <StackPanel>
+                        <Grid>
+                            <TextBlock Text="版本" FontSize="13" VerticalAlignment="Center" />
+                            <TextBlock x:Name="txtVersion" Text="1.0.0" Style="{StaticResource Caption}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                        </Grid>
+                        <TextBox x:Name="txtUpdateFeed" Margin="0,10,0,0" Padding="10,7" Text="" />
+                        <Grid Margin="0,10,0,0">
+                            <TextBlock x:Name="txtUpdateStatus" Text="" FontSize="12" Foreground="{DynamicResource TextDimBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" MaxWidth="230" HorizontalAlignment="Left" />
+                            <Button x:Name="btnCheckUpdate" Content="检查更新" Style="{StaticResource GhostButton}" Padding="10,3" FontSize="12" HorizontalAlignment="Right" Click="OnCheckUpdate" />
+                        </Grid>
+                        <Button x:Name="btnUpdateFromFile" Content="从文件更新…" Style="{StaticResource GhostButton}" Padding="10,3" FontSize="12" HorizontalAlignment="Left" Margin="0,8,0,0" Click="OnUpdateFromFile" />
+                    </StackPanel>
+                </Border>
+
+                <Border x:Name="pickerCard" Background="{DynamicResource SurfaceBrush}" CornerRadius="14" Padding="18,14" BorderBrush="{DynamicResource HairlineBrush}" BorderThickness="1" Margin="0,12,0,0" Visibility="Collapsed">
+                    <StackPanel>
+                        <TextBlock x:Name="pickerTitle" Text="背景色" Style="{StaticResource H2}" FontSize="13" Margin="0,0,0,10" />
+                        <ContentControl x:Name="pickerHost" />
+                    </StackPanel>
+                </Border>
+
+                <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="14" Padding="18,14" BorderBrush="{DynamicResource HairlineBrush}" BorderThickness="1" Margin="0,12,0,0">
+                    <StackPanel>
+                        <TextBlock Text="常用背景色" Style="{StaticResource H2}" FontSize="13" Margin="0,0,0,10" />
+                        <WrapPanel x:Name="surfacePresets" />
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</Window>

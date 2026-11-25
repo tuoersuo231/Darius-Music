@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <!-- Windows SDK version TFM: gives us the WinRT MediaPlayer, which can stream http(s)
+         and FLAC. WPF's MediaPlayer refuses http sources, which forced a full download first. -->
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>Darius Music</AssemblyName>
+    <RootNamespace>CurrentLyrics</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <StartupObject>CurrentLyrics.Program</StartupObject>
+    <Version>1.2.31</Version>
+    <Product>Darius Music</Product>
+    <AssemblyTitle>Darius Music</AssemblyTitle>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
+    <!-- 更新源跟着包走：发布时用 -p:UpdateFeedDefault=... 烘一个进去；留空则只认
+         exe 旁边的 update-feed.txt（一行地址，# 开头是注释）。本仓库不内置任何地址。-->
+    <UpdateFeedDefault Condition="'$(UpdateFeedDefault)' == ''"></UpdateFeedDefault>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <AssemblyMetadata Include="UpdateFeed" Value="$(UpdateFeedDefault)" />
+    <None Update="update-feed.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+
+  <ItemGroup>
+    <Resource Include="Assets\app.png" />
+    <None Update="Fonts\**\*.*" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Assets\**\*.*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+
+  <ItemGroup>
+    <PackageReference Include="Jint" Version="4.18.1" />
+  </ItemGroup>
+
+</Project>

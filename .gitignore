@@ -1,0 +1,21 @@
+# 构建产物
+bin/
+obj/
+publish/
+*.user
+.vs/
+
+# 运行时数据（含网易云 Cookie、本机路径、缓存与下载）
+data/
+data-*/
+downloads/
+
+# 自检 / QA 产物
+qa/
+update-check.txt
+*.log
+
+# 备份文件
+*.bak
+*.bak2
+*.orig
