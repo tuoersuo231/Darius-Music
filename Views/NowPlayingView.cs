@@ -652,6 +652,9 @@ public sealed class NowPlayingView : Grid
     /// this thread, so every millisecond the page spends redrawing lyrics is a millisecond the window
     /// does not follow the cursor — which is what "dragging stutters" actually is.</summary>
     private bool _dragHold;
+    /// <summary>Whether the neighbour smear was on when the drag loop started, so the drag can restore
+    /// it instead of guessing. See SetWindowDragHold.</summary>
+    private bool _softBeforeDrag;
 
     public void SetWindowDragHold(bool on)
     {
@@ -659,11 +662,17 @@ public sealed class NowPlayingView : Grid
         _dragHold = on;
         if (on)
         {
+            _softBeforeDrag = _stack.SoftNeighbours;
             _stack.SoftNeighbours = false;
             return;
         }
+        // Restore, do NOT hard-code true. Forcing the nine-tap smear on after every window move left
+        // every neighbour (distance >= 2) baked with a ±(font*0.072) ghost for the rest of the
+        // session — measured as the "字体笔画变粗" that只 appears on this page and never on the
+        // desktop overlay (which keeps SoftNeighbours false). A restart cleared it, one window move
+        // brought it back, which is why it kept "coming back".
+        _stack.SoftNeighbours = _softBeforeDrag;
         // Back out of the loop: catch up in one paint instead of replaying the skipped frames.
-        _stack.SoftNeighbours = true;
         _stack.Snap();
         ApplyPlayerSettings();
         OnTick(_player.PositionMs);       // 进度条与两个时间标签补齐
@@ -1237,6 +1246,15 @@ public sealed class NowPlayingView : Grid
     /// <summary>QA: drive the lyric renderer directly, so its per-frame cost can be timed without the
     /// 16 ms player clock in the way.</summary>
     internal void DebugAdvance(long positionMs) => _stack.Tick(positionMs);
+    /// <summary>Live scroll offset of the transition, sampled per composed frame by --cue-perf to
+    /// count how many distinct animation positions a transition actually gets.</summary>
+    internal double DebugScrollDelta => _stack.DebugScrollDelta;
+    internal double DebugPitch => _stack.DebugPitch;
+    internal double DebugMorph => _stack.DebugMorph;
+    internal double DebugShift => _stack.DebugShift;
+    internal double DebugOffsetFix => _stack.DebugOffsetFix;
+    internal string DebugRows => _stack.DebugRows;
+    internal string DebugFrameWork => _stack.DebugFrameWork;
 
     /// <summary>QA: how long the column's own DrawCore takes per repaint (the geometry emission, not
     /// WPF's rasterisation of it).</summary>

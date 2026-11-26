@@ -36,13 +36,19 @@ public sealed class WordSegment
 public sealed class LyricStackView : FrameworkElement
 {
 
-    /// <summary>Scroll + grow timing. The 380/300 ms pair felt rushed; this is back to the 620/420 ms
-    /// the user preferred, with the outgoing row still shrinking first so two full-size rows never
-    /// cross in place.</summary>
-    private const double ScrollDurationMs = 620;
+    /// <summary>Scroll + grow timing. The 380/300 ms pair felt rushed, then 620/420 ms; the user asked
+    /// for the scroll to be 100 ms quicker, so 500/420: the outgoing row is still shrinking while it
+    /// glides, and the whole move finishes before the grow does, so two full-size rows never cross in
+    /// place. The per-row correction (see _offsetFix) rides this same constant, so every row lands
+    /// exactly on its new slot when the scroll reaches 0.</summary>
+    private const double ScrollDurationMs = 500;
     private const double MorphDurationMs = 420;
     private const double MorphDelayMs = 40;
     private const double LineHeightRatio = 1.45;
+    /// <summary>How early the column adopts the next cue, in milliseconds. This shifts ONLY which cue
+    /// is the reading line: the karaoke fill, the glow and the word timings all keep reading the real
+    /// playback position (`_positionMs`), so nothing except the moment of the line change moves.</summary>
+    private const long CueLeadMs = 100;
 
     private LyricDocument? _doc;
     private long _positionMs;
@@ -84,6 +90,38 @@ public sealed class LyricStackView : FrameworkElement
     private double _tilt = -32;
     private double _vpOffset = 1.6;
     private double _perspectiveShift;
+    /// <summary>Horizontal shift the column was showing when the cue changed. The shift is derived from
+    /// the CURRENT line's ink width, so recomputing it on the switch frame moved the whole column
+    /// sideways in one frame (measured 36.47 → 43.26 px between two lines). It now eases from this
+    /// value to the new line's over the same 620 ms as the scroll.</summary>
+    private double _shiftFrom;
+    /// <summary>The column's horizontal position, computed once and then held. Re-centring it per cue
+    /// moved the whole column sideways at every line change (a step, then — after the first easing
+    /// attempt — a slow drift back), which is the "位置突变" the user kept seeing. A seek or a
+    /// settings/document change re-locks it; a normal cue change does not. LYRIC_LINECENTER=1 restores
+    /// the old per-line centring for an A/B.</summary>
+    private double _shiftLock = double.NaN;
+    /// <summary>Per-row correction for the frame the cue changes. The vertical layout is measured from
+    /// the READING row: the anchor contributes its full height, every neighbour only
+    /// Height*1/CurrentScale. When the anchor moves by one row, the same cue is therefore laid out
+    /// (1 - 1/CurrentScale)*|hOld - hNew|/2 higher or lower than it was — measured 12.4 DIP at the
+    /// user's 38 px font, in ONE frame, on top of the scroll. That is the "字的位置突然变化" that
+    /// survived every previous attempt: a single uniform scroll value cannot absorb a per-row
+    /// mismatch, and the perspective branch below never even applied this correction (it drew
+    /// layoutOffset + scroll directly). Every visible row's on-screen offset is now captured BEFORE
+    /// the anchor moves and blended to the new layout over the same 620 ms as the scroll, so the
+    /// column starts exactly where it was and nothing moves discontinuously.
+    /// Reference implementation: CurrentMusicX (流声音乐) MonetLyricsRail — `monetTrackPositions`
+    /// computes each row's target from the TARGET geometry and every row owns a spring
+    /// (stiffness 173, damping ratio 1.30), so a line change is per-row interpolation, never a
+    /// layout swap. It also never fades the column out.</summary>
+    private readonly Dictionary<int, double> _offsetFix = new();
+    private double _offsetFixMax;
+    /// <summary>Largest pre-switch layout mismatch among the rows visible at the last cue change, in
+    /// DIP. This is the size of the one-frame jump the correction removes; --cue-perf reports it.</summary>
+    public double DebugOffsetFix => _offsetFixMax;
+    private double _offsetFixStart = double.NaN;
+    private static readonly bool LineCentredShift = Environment.GetEnvironmentVariable("LYRIC_LINECENTER") == "1";
     private double _perspectiveFit = 1;
     private double _perspectivePitch = 1;
     private double _scaleCenterX;
@@ -171,11 +209,22 @@ public sealed class LyricStackView : FrameworkElement
     public double DebugFadeH => _fadeH;
     public double DebugFadeV => _fadeV;
     public double DebugScrollDelta => _scrollDelta;
+    /// <summary>Row pitch actually used this frame (the distance from the reading row to the next one).
+    /// --cue-perf samples it per frame: a pitch that flips between two values on alternating frames is
+    /// what makes the whole column look like it jumps down and back for a few frames.</summary>
+    public double DebugPitch => _doc == null || _current < 0
+        ? 0
+        : OffsetOf(Math.Min(_doc.Lines.Count - 1, _current + 1), _current);
     public double DebugMorph => MorphProgress;
+    /// <summary>Whole-column horizontal shift for this frame. It is derived from the CURRENT line's
+    /// warped ink bounds, so it changes the instant the reading line changes — that is the sideways
+    /// jump the user reported. Dumped per frame by --cue-perf.</summary>
+    public double DebugShift => _perspectiveShift;
+
     public bool DebugMorphing => _morphing;
 
     /// <summary>True while a scroll or morph is still running, so the host knows to keep ticking.</summary>
-    public bool HasActiveAnimation => _scrollDelta != 0 || _morphing;
+    public bool HasActiveAnimation => _scrollDelta != 0 || _morphing || _offsetFix.Count > 0;
     public bool DebugFadeEnabled => _fadeEnabled;
     public double DebugFadeStrength => _fadeStrength;
     public string DebugMode => _backdropMode.ToString();
@@ -298,6 +347,7 @@ public sealed class LyricStackView : FrameworkElement
             _previous = -1;
             _scrollDelta = 0;
             _morphing = false;
+            _offsetFix.Clear();
         }
         Tick(positionMs);
     }
@@ -311,7 +361,7 @@ public sealed class LyricStackView : FrameworkElement
             return;
         }
 
-        int index = _doc.LineIndexAt(positionMs, out _);
+        int index = _doc.LineIndexAt(positionMs + CueLeadMs, out _);
         if (index < 0) index = 0;
 
         AdvanceAnimations();
@@ -320,6 +370,17 @@ public sealed class LyricStackView : FrameworkElement
         {
             // Where the incoming cue sits in the old layout decides the scroll distance.
             double previousOffset = _current >= 0 ? OffsetOf(index, _current) : 0;
+            double pitch = _perspective ? _perspectivePitch : 1.0;
+            // Capture where every row is drawn RIGHT NOW, while the anchor is still the old one. Rows
+            // whose layout distance changes with the anchor (all of them, by the anchor's own scaled vs
+            // unscaled half-height) then start from the pixel they were on instead of snapping.
+            var before = new Dictionary<int, double>();
+            if (_current >= 0)
+            {
+                int span = Math.Max(1, _visibleLines / 2) + 4;
+                for (int k2 = Math.Max(0, index - span); k2 <= Math.Min(_doc.Lines.Count - 1, index + span); k2++)
+                    before[k2] = OffsetNow(k2, pitch);
+            }
             _previous = _current < 0 ? index : _current;
             _current = index;
             _scrollFrom = previousOffset;
@@ -327,10 +388,35 @@ public sealed class LyricStackView : FrameworkElement
             _scrollStart = Now;
             _morphStart = Now;
             _morphing = _previous != _current;
+            _offsetFix.Clear();
+            foreach (var kv in before) _offsetFix[kv.Key] = kv.Value;
+            _offsetFixStart = Now;
+            _offsetFixMax = 0;
+            foreach (var kv in _offsetFix)
+            {
+                double jumped = OffsetOf(kv.Key, _current) * pitch + _scrollDelta;
+                _offsetFixMax = Math.Max(_offsetFixMax, Math.Abs(kv.Value - jumped));
+            }
+            // A seek re-locks the column; a normal one-line step must not move it sideways at all.
+            if (_previous < 0 || Math.Abs(index - _previous) > 1) _shiftLock = double.NaN;
             LineChanged?.Invoke();
         }
 
         InvalidateVisual();
+    }
+
+    /// <summary>Vertical offset a row is drawn with in the layout that is current right now, including
+    /// any per-row correction still in flight from the previous cue change. Used to capture the
+    /// on-screen position of every row before the anchor moves.</summary>
+    private double OffsetNow(int index, double pitch)
+    {
+        double offset = OffsetOf(index, _current) * pitch + _scrollDelta;
+        if (_offsetFix.Count > 0 && _offsetFix.TryGetValue(index, out double was))
+        {
+            double ft = double.IsNaN(_offsetFixStart) ? 1 : Math.Clamp((Now - _offsetFixStart) / ScrollDurationMs, 0, 1);
+            if (ft < 1) offset += (was - offset) * (1 - BackdropBlur.Smooth(ft));
+        }
+        return offset;
     }
 
     /// <summary>Per-frame advance for the composition-driven path. The player clock only fires every
@@ -339,7 +425,7 @@ public sealed class LyricStackView : FrameworkElement
     /// 179 Hz call rate must not become 179 full repaints per second.</summary>
     public void Advance(long positionMs)
     {
-        bool animating = _scrollDelta != 0 || _morphing;
+        bool animating = _scrollDelta != 0 || _morphing || _offsetFix.Count > 0;
         if (positionMs == _positionMs && !animating) return;
         Tick(positionMs);
     }
@@ -349,10 +435,20 @@ public sealed class LyricStackView : FrameworkElement
     {
         _scrollDelta = 0;
         _morphing = false;
+        _offsetFix.Clear();
         InvalidateVisual();
     }
 
-    private static double Now => Environment.TickCount64;
+    /// <summary>Phase clock for the scroll/grow animations, in milliseconds. It has to be high
+    /// resolution: Environment.TickCount64 only steps every 15.6 ms on this machine (measured 65
+    /// distinct values per second), so a transition sampled from it had ~65 distinct positions per
+    /// second however fast the compositor painted — the "帧数被锁住" the user could see. Stopwatch
+    /// reads QueryPerformanceCounter, which is monotonic and sub-microsecond.</summary>
+    private static readonly System.Diagnostics.Stopwatch PhaseClock = System.Diagnostics.Stopwatch.StartNew();
+    /// <summary>A/B switch: LYRIC_LOWRESCLOCK=1 puts the animation phase back on TickCount64 (the old
+    /// 15.6 ms-quantised behaviour) so the same binary can be measured both ways.</summary>
+    private static readonly bool LowResClock = Environment.GetEnvironmentVariable("LYRIC_LOWRESCLOCK") == "1";
+    private static double Now => LowResClock ? Environment.TickCount64 : PhaseClock.Elapsed.TotalMilliseconds;
 
     private void AdvanceAnimations()
     {
@@ -363,6 +459,11 @@ public sealed class LyricStackView : FrameworkElement
             // this length reads as a lurch.
             _scrollDelta = t >= 1 ? 0 : _scrollFrom * (1 - BackdropBlur.Smooth(t));
         }
+        // The per-row correction expires with the scroll it was seeded from. At t >= 1 its blend factor
+        // is 0 anyway, so dropping it here cannot move a pixel — and it must not depend on a row having
+        // been drawn, or a fully culled window would keep the overlay repainting forever.
+        if (_offsetFix.Count > 0 && (double.IsNaN(_offsetFixStart) || Now - _offsetFixStart >= ScrollDurationMs))
+            _offsetFix.Clear();
         if (_morphing && Now - _morphStart >= MorphDelayMs + MorphDurationMs) _morphing = false;
     }
 
@@ -370,7 +471,7 @@ public sealed class LyricStackView : FrameworkElement
 
     private double MorphProgress => !_morphing || _previous < 0 || _previous == _current
         ? 1
-        : EaseOut(Math.Clamp((Now - _morphStart - MorphDelayMs) / MorphDurationMs, 0, 1));
+        : BackdropBlur.Smooth(Math.Clamp((Now - _morphStart - MorphDelayMs) / MorphDurationMs, 0, 1));
 
     /// <summary>Where a row sits between the two looks: 0 = still the reading line (dim unsung text,
     /// bright sung text, glow), 1 = an ordinary neighbour (one flat bright image). A cue change used to
@@ -398,6 +499,19 @@ public sealed class LyricStackView : FrameworkElement
         if (bounds.IsEmpty) return 0;
         double x0 = (width - _columnWidth) / 2;
         return width / 2 - (bounds.Left + bounds.Width / 2) - x0;
+    }
+
+    /// <summary>
+    /// The column's horizontal centring, eased across a cue change. Without the ease the shift is a
+    /// step function of the reading line (it is computed from that line's ink width), so every line
+    /// change snapped the whole column sideways — the "字的位置突然变化" the user reported. A NaN
+    /// start (first cue ever) means there is nothing to ease from.
+    /// </summary>
+    private double AnimatedPerspectiveShift(double width)
+    {
+        if (!double.IsNaN(_shiftLock)) return _shiftLock;
+        _shiftLock = ComputePerspectiveShift(width);
+        return _shiftLock;
     }
 
     private double HeightOf(int index)
@@ -473,6 +587,24 @@ public sealed class LyricStackView : FrameworkElement
         LastRenderMs = 0;
     }
 
+    /// <summary>What the last paint actually placed, as "index:y/alpha" pairs. This is the only honest
+    /// way to see a one-frame position blip: the y values the loop computed, not a correlation of the
+    /// pixels afterwards.</summary>
+    private readonly List<string> _drawnRows = new();
+    public string DebugRows => string.Join(";", _drawnRows);
+    /// <summary>Only records the drawn rows when a QA run asks for it (LYRIC_DEBUG_ROWS=1): the list
+    /// allocates a string per row per paint, which is 2500 strings/s at 170 fps.</summary>
+    private static readonly bool CaptureRows = Environment.GetEnvironmentVariable("LYRIC_DEBUG_ROWS") == "1";
+
+    // ---- per-frame work accounting (QA only, LYRIC_DEBUG_ROWS=1) ----
+    // The stutter at a cue change is one frame doing several jobs at once. These are the exact ms of
+    // each job in the frame that is being built, so the spike can be attributed instead of guessed.
+    private double _wkBuild, _wkBake, _wkWords, _wkHalo, _wkRows;
+    private int _wkBuiltLines, _wkBakedWordParts, _bakeCounter, _wkInlineBakes;
+    public string DebugFrameWork =>
+        $"build={_wkBuild:0.00}/{_wkBuiltLines} bake={_wkBake:0.00} words={_wkWords:0.00}/{_wkBakedWordParts} " +
+        $"halo={_wkHalo:0.00} rows={_wkRows:0.00}/{_wkInlineBakes} fix={_offsetFix.Count}/{_offsetFixMax:0.0}";
+
     /// <summary>
     /// Draws the lyric column into any context at an explicit size. The overlay window composites the
     /// backdrop and these glyphs into one bitmap, so the alpha ramp lives in a single image instead of
@@ -498,9 +630,22 @@ public sealed class LyricStackView : FrameworkElement
         // in the meantime: rebuilding a dozen warped, glowing lines at once cost 50-130 ms per frame,
         // which is what made dragging the settings sliders stutter.
         int half = Math.Max(1, _visibleLines / 2);
-        int warmFrom = Math.Max(0, _current - half - 1);
-        int warmTo = Math.Min(_doc.Lines.Count - 1, _current + half + 1);
+        // One row beyond the visible window on each side: the row that is on its way out of the
+        // window used to be cut by this range the moment the cue changed (it vanished in a single
+        // frame instead of fading through the edge band). Drawing it one row further lets
+        // TextEdgeFade take it down to ~0.1 while it slides out.
+        int drawHalf = half + 2;
+        int warmFrom = Math.Max(0, _current - drawHalf - 1);
+        int warmTo = Math.Min(_doc.Lines.Count - 1, _current + drawHalf + 1);
+        // Jobs for the cue that becomes current next: build its geometry first, then bake its reading
+        // image on the following frame. Either of them landing on the switch frame itself was the hitch.
+        int _upcoming = _current + 1;
+        bool _upcomingValid = _upcoming >= 0 && _upcoming < _doc.Lines.Count;
+        LineRender? _upcomingRender = null;
+        if (_upcomingValid) _cache.TryGetValue(_upcoming, out _upcomingRender);
+        bool _bakeDue = !_rebuilding && _upcomingRender != null && _upcomingRender.BakedCurrent == null;
         bool builtLine = false;
+        long wk0 = System.Diagnostics.Stopwatch.GetTimestamp();
         if (_rebuilding)
         {
             int budget = RebuildLinesPerFrame;
@@ -533,45 +678,76 @@ public sealed class LyricStackView : FrameworkElement
         }
         else
         {
-            // One line per frame, centre first: building the whole warm window in a single frame (a
-            // FormattedText layout per line, plus one boolean geometry per word for the reading line)
-            // is a 16-32 ms stall on the first frame after every cue change.
-            for (int k = 0; k <= warmTo - warmFrom; k++)
+            // One job per frame, ordered by deadline. A cue change needs two things that used to land
+            // on the frame of the change itself (a measured 21 ms frame): the incoming line's geometry
+            // and its reading-line bake. Both are prepared here as early as the cache allows, so the
+            // switch frame only has to draw. Centre first for the rest, otherwise the warm window
+            // builds outwards and the far rows are still missing when the cue arrives.
+            bool jobDone = false;
+            if (_upcomingValid && _upcomingRender == null)
             {
-                int i = _current + (k % 2 == 0 ? k / 2 : -(k / 2 + 1));
-                if (i < warmFrom || i > warmTo || _cache.ContainsKey(i)) continue;
-                BuildLine(i);
+                BuildLine(_upcoming);
                 builtLine = true;
-                break;
+                jobDone = true;
+            }
+            if (!jobDone && !_bakeDue)
+            {
+                // Next: the row that will ENTER the window when the cue changes (it sits one row past
+                // the warm window now). Building it on the switch frame was an 8 ms BuildLine landing
+                // exactly on the visible hitch.
+                int entering = Math.Min(_doc.Lines.Count - 1, _current + drawHalf + 2);
+                if (entering > _current && !_cache.ContainsKey(entering))
+                {
+                    BuildLine(entering);
+                    builtLine = true;
+                    jobDone = true;
+                }
+                else
+                {
+                    for (int k = 0; k <= warmTo - warmFrom; k++)
+                    {
+                        int i = _current + (k % 2 == 0 ? k / 2 : -(k / 2 + 1));
+                        if (i < warmFrom || i > warmTo || _cache.ContainsKey(i)) continue;
+                        BuildLine(i);
+                        builtLine = true;
+                        break;
+                    }
+                }
             }
         }
 
         DrawFrostedBackdrop(dc, width, height);
+        _wkBuild = System.Diagnostics.Stopwatch.GetElapsedTime(wk0).TotalMilliseconds;
+        _wkBuiltLines = builtLine ? 1 : 0;
+        _wkBake = 0; _wkWords = 0; _wkHalo = 0; _wkBakedWordParts = 0;
 
-        // The reading-line image for the cue that becomes current NEXT — nothing else needs one, and
-        // only on a frame that did not just build a line. A cue change makes the warm window shift by
-        // one, so the same frame both built the incoming line and baked a reading-line image; those two
-        // 8-12 ms jobs are the 20-25 ms frame that made the switch visibly hitch.
-        int nextCue = _current + 1;
-        if (!builtLine && !_rebuilding && nextCue >= 0 && nextCue < _doc.Lines.Count &&
-            _cache.TryGetValue(nextCue, out var pending) && pending.BakedCurrent == null)
+        // The reading-line image for the cue that becomes current NEXT. Baking it on the frame the cue
+        // actually changes cost that frame 21 ms (bake + the first draw of a fresh bitmap), which is the
+        // hitch right after every line change; it is prepared here instead, frames ahead of time.
+        long bk0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (_bakeDue && _upcomingRender != null && _upcomingRender.BakedCurrent == null)
         {
             try
             {
                 double dpiBake = VisualTreeHelper.GetDpi(this).DpiScaleX;
                 if (!(dpiBake > 0.1)) dpiBake = 1.0;
-                pending.BakedCurrent = BakeLine(pending, 0, true, dpiBake);
+                _upcomingRender.BakedCurrent = BakeLine(_upcomingRender, 0, true, dpiBake);
             }
             catch { }
         }
+        _wkBake = System.Diagnostics.Stopwatch.GetElapsedTime(bk0).TotalMilliseconds;
 
         // Karaoke ink is the last thing a cue change still had to build. Two words a frame, reading line
         // first and the following cue after it, so the frame that changes cue has nothing left to do.
+        long ww0 = System.Diagnostics.Stopwatch.GetTimestamp();
         BuildWordPartsAhead();
+        _wkWords = System.Diagnostics.Stopwatch.GetElapsedTime(ww0).TotalMilliseconds;
         // Glow radius moved: re-blur a couple of word masks per frame instead of rebuilding the line.
         // One mask at the largest radius (radius 12 → 150×160 px, three box passes) is ~3 ms, so the
         // budget is two: a drag keeps the column around 140 fps instead of dropping to ~70.
+        long hh0 = System.Diagnostics.Stopwatch.GetTimestamp();
         RefreshGlowHalos(2);
+        _wkHalo = System.Diagnostics.Stopwatch.GetElapsedTime(hh0).TotalMilliseconds;
 
         double anchorY = height * _anchor;
         double progress = MorphProgress;
@@ -592,9 +768,14 @@ public sealed class LyricStackView : FrameworkElement
             _perspectivePitch = 1;
             _scaleCenterX = _columnWidth / 2;
         }
-        _perspectiveShift = _perspective ? ComputePerspectiveShift(width) : 0;
+        _perspectiveShift = !_perspective ? 0
+            : LineCentredShift ? ComputePerspectiveShift(width)
+            : AnimatedPerspectiveShift(width);
 
-        for (int i = Math.Max(0, _current - half); i <= Math.Min(_doc.Lines.Count - 1, _current + half); i++)
+        if (CaptureRows) _drawnRows.Clear();
+        long rw0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        int bakeStart = _bakeCounter;
+        for (int i = Math.Max(0, _current - drawHalf); i <= Math.Min(_doc.Lines.Count - 1, _current + drawHalf); i++)
         {
             if (!_translation && _doc.Lines[i].TranslationOnly) continue;
             var render = GetLine(i);
@@ -606,9 +787,19 @@ public sealed class LyricStackView : FrameworkElement
             // reading line every time a cue changes.
             double layoutOffset = OffsetOf(i, _current) * (_perspective ? _perspectivePitch : 1.0);
             double offset = layoutOffset + scroll;
+            if (_offsetFix.Count > 0 && _offsetFix.TryGetValue(i, out double was))
+            {
+                double ft = double.IsNaN(_offsetFixStart) ? 1 : Math.Clamp((Now - _offsetFixStart) / ScrollDurationMs, 0, 1);
+                if (ft < 1) offset += (was - offset) * (1 - BackdropBlur.Smooth(ft));
+            }
             double lineHeight = render.Height * scale;
             if (Math.Abs(offset) > height) continue;
-            if (alpha <= 0.012) continue;
+            // Only skip rows that are effectively invisible. At 0.012 the outermost neighbour was
+            // dropped while it was still on screen and still fading, which is what read as a pop.
+            // 0.05 keeps the fade (it passes 0.44 → 0.29 → 0.19 → 0.13 → 0.08 → 0.05 while sliding out)
+            // but stops paying for a full sheared bitmap blit per invisible row: four of the fifteen
+            // rows sat at the 0.08 distance floor.
+            if (alpha <= 0.05) continue;
 
             double y = Snap(anchorY + offset - lineHeight / 2);
             // Soft edge for the text itself. It used to ride on EdgeFadeFactor, which returns 1.0 for a
@@ -625,7 +816,7 @@ public sealed class LyricStackView : FrameworkElement
                 // reading row (d = 0) comes out exactly horizontal.
                 double sLeft = _plane.Scale(0);
                 double sRight = _plane.Scale(_columnWidth);
-                double d = Snap(layoutOffset + scroll);
+                double d = Snap(offset);
                 double y0 = Snap(anchorY + d * sLeft);
                 double y1 = Snap(anchorY + d * sRight);
                 double x0 = x;
@@ -636,6 +827,7 @@ public sealed class LyricStackView : FrameworkElement
                 dc.PushTransform(new MatrixTransform(1, shear, 0, 1, 0, 0));
                 if (Math.Abs(scale - 1) > 0.001)
                     dc.PushTransform(new ScaleTransform(scale, scale, _scaleCenterX, 0));
+                if (CaptureRows) _drawnRows.Add($"{i}:{y0:0.0}/{alpha:0.00}/{scale:0.000}");
                 DrawRow(dc, render, i, alpha, Math.Abs(i - _current));
                 if (Math.Abs(scale - 1) > 0.001) dc.Pop();
                 dc.Pop();
@@ -648,11 +840,14 @@ public sealed class LyricStackView : FrameworkElement
             dc.PushTransform(new TranslateTransform(x, y));
             if (Math.Abs(scale - 1) > 0.001) dc.PushTransform(new ScaleTransform(scale, scale, _scaleCenterX, 0));
 
+            if (CaptureRows) _drawnRows.Add($"{i}:{y:0.0}/{alpha:0.00}/{scale:0.000}");
             DrawRow(dc, render, i, alpha, Math.Abs(i - _current));
 
             if (Math.Abs(scale - 1) > 0.001) dc.Pop();
             dc.Pop();
         }
+        _wkRows = System.Diagnostics.Stopwatch.GetElapsedTime(rw0).TotalMilliseconds;
+        _wkInlineBakes = _bakeCounter - bakeStart;
 
         // The rebuild is spread over frames, so keep asking for the next one: without this the column
         // would sit on the previous geometry until something else invalidated it.
@@ -760,17 +955,20 @@ public sealed class LyricStackView : FrameworkElement
     /// feather (<see cref="EdgeFadeFactor"/>) this one is always on: the text has to dissolve at the
     /// edge whether or not there is a frost pill behind it. The band is taken from the font size and
     /// the box's own extent, so a long cue that wraps over two or three rows fades as a whole.
+    /// It reaches exactly 0 at the edge (it used to stop at 0.10): with the old floor the outermost
+    /// row stayed at 8% × 0.10 and was then dropped by the alpha cutoff in one frame — the top line
+    /// of the column used to disappear in a single frame instead of fading out.
     /// </summary>
     private double TextEdgeFade(double top, double lineHeight, double height)
     {
         if (height <= 1) return 1;
-        double band = Math.Max(_fontSize * 0.9, height * 0.06);
+        double band = Math.Max(_fontSize * 1.15, height * 0.08);
         if (band <= 1) return 1;
         double bottom = top + Math.Max(1, lineHeight);
         double entering = Math.Clamp(bottom / band, 0, 1);          // 0 while the box is still above
         double leaving = Math.Clamp((height - top) / band, 0, 1);   // 0 once the box left below
         double factor = Math.Min(entering, leaving);
-        return 0.10 + 0.90 * BackdropBlur.Smooth(Math.Clamp(factor, 0, 1));
+        return BackdropBlur.Smooth(Math.Clamp(factor, 0, 1));
     }
 
     private double EdgeFadeFactor(double centreY, double height)
@@ -795,13 +993,17 @@ public sealed class LyricStackView : FrameworkElement
         // its size for the whole 420 ms while the new one grew into it. Now the outgoing row shrinks
         // first and quickly (finishes in ~55% of the morph) and the incoming row grows after the
         // slide has started, so the eye follows one row up instead of watching two rows overlap.
+        // Smoothstep, not ease-out: ease-out leaves t=0 with 3x the average speed, so the very first
+        // frame after a cue change already shrank the row by ~3% of its size — with CurrentScale 1.71
+        // that is a visible one-frame jump of every glyph (~10 px at the ends of a long line), then the
+        // rest of the shrink looked like "moving back". Smoothstep starts and ends at zero velocity.
         if (index == _previous)
         {
             double t = Math.Clamp((Now - _morphStart) / (MorphDurationMs * 0.55), 0, 1);
-            return 1 + (_neighbourScale - 1) * EaseOut(t);
+            return 1 + (_neighbourScale - 1) * BackdropBlur.Smooth(t);
         }
         double incoming = Math.Clamp((Now - _morphStart - MorphDelayMs) / MorphDurationMs, 0, 1);
-        return _neighbourScale + (1 - _neighbourScale) * EaseOut(incoming);
+        return _neighbourScale + (1 - _neighbourScale) * BackdropBlur.Smooth(incoming);
     }
 
     private double AlphaFor(int index, double progress)
@@ -1048,6 +1250,7 @@ public sealed class LyricStackView : FrameworkElement
 
     private BakedText? BakeLine(LineRender render, int distance, bool current, double scale)
     {
+        _bakeCounter++;
         var baseGeometry = render.WarpedInk ?? render.Ink;
         // The sung image has to live in the SAME space as the base image: the karaoke clips are
         // warped quads, so baking the unwarped ink here made the bright copy land offset from the
@@ -1201,17 +1404,22 @@ public sealed class LyricStackView : FrameworkElement
             pdc.Pop();
         }
         part.Baked = BakeImage(partVisual, partRect, scale);
+        _bakeCounter++;
         part.BakedRect = partRect;
         part.BakedScale = scale;
         part.BakedColor = _textColor;
         return part;
     }
 
+    /// <summary>QA switch: 1 = skip the per-row opacity layer (rows draw at full alpha). Used only to
+    /// measure how much of the frame cost is WPF's intermediate surface per translucent row.</summary>
+    private static readonly bool NoRowOpacity = Environment.GetEnvironmentVariable("LYRIC_NOOPACITY") == "1";
+
     private bool DrawBaked(DrawingContext dc, LineRender render, double alpha, int distance, bool current)
     {
         var baked = EnsureBaked(render, distance, current);
         if (baked == null) return false;
-        bool fade = alpha < 0.995;
+        bool fade = alpha < 0.995 && !NoRowOpacity;
         if (fade) dc.PushOpacity(Math.Clamp(alpha, 0, 1));
         dc.DrawImage(baked.Base, baked.Rect);
         if (current && baked.Sung != null) DrawSungParts(dc, render, baked);
@@ -1636,6 +1844,8 @@ public sealed class LyricStackView : FrameworkElement
     /// can be spread over several frames instead of one long stall.</summary>
     private void InvalidateCache()
     {
+        // Geometry changed (font/tilt/width/settings): the frozen horizontal position is stale.
+        _shiftLock = double.NaN;
         // 重建期间又要重建（拖 3D 倾斜/交点时每帧都在改）：让它先把这一轮跑完，否则每帧都从零开始，
         // 整列永远换不上新姿态（旧代码是每帧丢一次 → 一半旧一半新 → 文字闪）。
         if (_rebuilding)

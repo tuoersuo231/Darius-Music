@@ -10,6 +10,11 @@ namespace CurrentLyrics;
 
 public static class Program
 {
+    /// <summary>QA-only A/B: LYRIC_NOSOFT=1 renders the still/film harness WITHOUT the neighbour
+    /// smear, so the same binary can show what that smear does to the glyph weight of the rows around
+    /// the reading line (the player page used to force it on after any window move).</summary>
+    private static bool QaSoftNeighbours => Environment.GetEnvironmentVariable("LYRIC_NOSOFT") != "1";
+
     [STAThread]
     public static void Main(string[] args)
     {
@@ -176,7 +181,7 @@ public static class Program
                 // 931 / 619 = the two window widths the user compared; 344 = the portrait column.
                 foreach (var (cw, w, h) in new[] { (931.0, 1240, 820), (619.0, 900, 820), (344.0, 520, 880) })
                 {
-                    var view = new Controls.LyricStackView { IsHitTestVisible = false, SoftNeighbours = true };
+                    var view = new Controls.LyricStackView { IsHitTestVisible = false, SoftNeighbours = QaSoftNeighbours };
                     view.FanReferenceWidth = fanRef;
                     var s = settings.Clone();
                     s.FontSize = settings.PlayerFontSize;
@@ -226,7 +231,7 @@ public static class Program
             var kqReport = new List<string> { $"src={(kqLrc ?? "<demo>")} lines={kqDoc.Lines.Count} pos={kqAt}" };
             foreach (double kqSpread in new[] { 0.5, 1.0, 2.0 })
             {
-            var view = new Controls.LyricStackView { IsHitTestVisible = false, SoftNeighbours = true };
+            var view = new Controls.LyricStackView { IsHitTestVisible = false, SoftNeighbours = QaSoftNeighbours };
             var s = settings.Clone();
             s.FontSize = settings.PlayerFontSize;
             s.VisibleLines = settings.PlayerVisibleLines;
@@ -265,7 +270,7 @@ public static class Program
             // 3D 倾斜：滑块上的角度和真正画出来的远近比是不是一一对应（以前 >30° 全部饱和）。
             foreach (double kqTilt in new[] { 20.0, 30.0, 45.0, 60.0, 75.0 })
             {
-                var tv = new Controls.LyricStackView { IsHitTestVisible = false, SoftNeighbours = true };
+                var tv = new Controls.LyricStackView { IsHitTestVisible = false, SoftNeighbours = QaSoftNeighbours };
                 var ts = settings.Clone();
                 ts.FontSize = settings.PlayerFontSize;
                 ts.VisibleLines = settings.PlayerVisibleLines;
@@ -2867,11 +2872,22 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
 
             var clock = System.Diagnostics.Stopwatch.StartNew();
             var stamps = new List<double>();
-            System.EventHandler onRender = (_, _) => stamps.Add(clock.Elapsed.TotalMilliseconds);
+            // Per-frame scroll offset: how many *distinct* animation positions the transition got
+            // tells you whether raising the paint rate actually bought smoother motion (a low-res
+            // phase clock would keep repeating the same offset several frames in a row).
+            var scrolls = new List<double>();
+            var csv = new List<string> { "t_ms,scroll,pitch,morph,work,rows,shift" };
+            System.EventHandler onRender = (_, _) =>
+            {
+                stamps.Add(clock.Elapsed.TotalMilliseconds);
+                scrolls.Add(view.DebugScrollDelta);
+                csv.Add($"{clock.Elapsed.TotalMilliseconds:0.00},{view.DebugScrollDelta:0.000},{view.DebugPitch:0.000},{view.DebugMorph:0.0000},{view.DebugFrameWork},{view.DebugRows},{view.DebugShift:0.00}");
+            };
             System.Windows.Media.CompositionTarget.Rendering += onRender;
             view.DebugPinPositionAnimated(cueMs + 10);
             PumpFrames(700);
             System.Windows.Media.CompositionTarget.Rendering -= onRender;
+            File.WriteAllLines(Path.Combine(dir, $"frames-cue{cue}.csv"), csv);
 
             double worst = 0, total = 0;
             int over9 = 0, over20 = 0;
@@ -2884,7 +2900,22 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
                 if (d > 20) over20++;
             }
             double avg = stamps.Count > 1 ? total / (stamps.Count - 1) : 0;
-            lines.Add($"cue {cue} @{cueMs}ms frames={stamps.Count} avg={avg:0.0}ms worst={worst:0.0}ms over9={over9} over20={over20}");
+            int distinct = scrolls.Select(v => Math.Round(v, 2)).Distinct().Count();
+            int longestRun = 1, run = 1;
+            for (int k = 1; k < scrolls.Count; k++)
+            {
+                if (Math.Round(scrolls[k], 2) == Math.Round(scrolls[k - 1], 2)) run++;
+                else { if (run > longestRun) longestRun = run; run = 1; }
+            }
+            if (run > longestRun) longestRun = run;
+            // 行距（pitch）在帧间来回跳 = 整列上下抖，这正是用户看到的「持续几帧的位置偏移」。
+            var pitches = csv.Skip(1).Select(l => l.Split(',')[2]).ToList();
+            int pitchFlips = 0;
+            for (int k = 1; k < pitches.Count; k++) if (pitches[k] != pitches[k - 1]) pitchFlips++;
+            int pitchValues = pitches.Distinct().Count();
+            lines.Add($"cue {cue} @{cueMs}ms frames={stamps.Count} avg={avg:0.0}ms worst={worst:0.0}ms " +
+                      $"over9={over9} over20={over20} scroll_positions={distinct} longest_repeat={longestRun} " +
+                      $"pitch_values={pitchValues} pitch_flips={pitchFlips} row_fix={view.DebugOffsetFix:0.0}px");
         }
         File.WriteAllLines(Path.Combine(dir, "perf.txt"), lines);
         window.Close();
@@ -2918,7 +2949,7 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
 
         int cueIndex = int.TryParse(Arg(args, "--cue"), out var ci) ? ci : Math.Min(3, doc.Lines.Count - 1);
         long cueMs = doc.Lines[Math.Clamp(cueIndex, 0, doc.Lines.Count - 1)].StartMs;
-        var lines = new List<string> { $"cue={cueIndex} at {cueMs}ms frames=10 step=38ms" };
+        var lines = new List<string> { $"cue={cueIndex} at {cueMs}ms " };
 
         view.DebugPinPosition(cueMs - 400);
         for (int i = 0; i < 10; i++) Pump(app, 50);
@@ -2928,13 +2959,17 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
         Save(window, Path.Combine(dir, "f-before.png"));
         lines.Add("before " + view.DebugKaraoke);
 
-        for (int f = 0; f < 10; f++)
+        // --frames/--step stretch the strip past the 250 ms the 10-frame default covered: the whole
+        // scroll+grow is 620+460 ms, so judging "does the column shift sideways" needs ~1.2 s.
+        int stripFrames = int.TryParse(Arg(args, "--frames"), out var sf) ? Math.Clamp(sf, 1, 120) : 10;
+        int stripStep = int.TryParse(Arg(args, "--step"), out var ss) ? Math.Clamp(ss, 5, 100) : 25;
+        for (int f = 0; f < stripFrames; f++)
         {
             view.DebugPinPositionAnimated(cueMs + f * 4);
-            Thread.Sleep(25);
-            app.Dispatcher.Invoke(() => { }, DispatcherPriority.Render);
+            Thread.Sleep(stripStep);
+            app.Dispatcher.Invoke(() => { }, System.Windows.Threading.DispatcherPriority.Render);
             Save(window, Path.Combine(dir, $"f{f:00}.png"));
-            lines.Add($"f{f:00} ~{(f + 1) * 25}ms {view.DebugState()} | {view.DebugKaraoke}");
+            lines.Add($"f{f:00} ~{(f + 1) * stripStep}ms {view.DebugState()} | shift={view.DebugShift:0.00} | {view.DebugRows}");
         }
         File.WriteAllLines(Path.Combine(dir, "film.txt"), lines);
         window.Close();

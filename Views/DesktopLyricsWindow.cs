@@ -761,20 +761,14 @@ public sealed class DesktopLyricsWindow : Window
     }
 
     private TimeSpan _lastRenderingTime = TimeSpan.MinValue;
-    private long _lastFrameTickMs;
 
     /// <summary>
-    /// Cap for lyric updates. The display here runs at 179 Hz, where 60 fps is exactly every third
-    /// compositor frame — so it stays frame-aligned instead of beating against the refresh.
-    /// Each update costs ~4 ms on the GPU, so uncapped (127 fps) burned ~56% of a core for no
-    /// visible gain; at 60 fps it is ~26%.
-    /// </summary>
-    private const double TargetFps = 60;
-
-    /// <summary>
-    /// Advances the lyric clock once per compositor frame. A 16 ms DispatcherTimer was measured at
-    /// only ~38 ticks/s with 1..45 ms jitter (it competes with the render pass), which is what made
-    /// every animation look steppy; this fires in step with the frames that actually get painted.
+    /// Advances the lyric clock once per compositor frame, on the same frame cadence the window
+    /// presents at. A 16 ms DispatcherTimer was measured at only ~38 ticks/s with 1..45 ms jitter
+    /// (it competes with the render pass), and a 60 fps throttle on top of that left the desktop
+    /// lyrics at 57.6 paints/s on a 179 Hz display — every transition showed the same position for
+    /// three refreshes in a row. Advance() (not Tick()) is used so a frame where neither the
+    /// position nor an animation moved is skipped instead of repainted.
     /// </summary>
     private void OnCompositionRendering(object? sender, EventArgs e)
     {
@@ -785,12 +779,9 @@ public sealed class DesktopLyricsWindow : Window
         }
         FrameCount++;
         if (!IsVisible || _demo) return;
-        long now = Environment.TickCount64;
-        if (now - _lastFrameTickMs < 1000.0 / TargetFps - 2) return;
-        _lastFrameTickMs = now;
         // Nothing to animate while paused — but let an in-flight transition finish.
         if (!_player.PlaybackState && !_stack.HasActiveAnimation) return;
-        _stack.Tick((long)Math.Max(0, _player.PositionMs));
+        _stack.Advance((long)Math.Max(0, _player.PositionMs));
         UpdateMetaVisibility();
     }
 
