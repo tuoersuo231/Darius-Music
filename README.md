@@ -2,13 +2,17 @@
 
 Windows 桌面音乐播放器 + 桌面歌词。WPF / .NET 10，无安装器、无运行时依赖注入；一个 exe 起一个进程，歌词逐字上色、延时辉光、3D 倾斜。
 
-> A Windows music player with a desktop lyric overlay, written in WPF on .NET 10. UI and lyric animations are ported from the GPL-3.0 project **CurrentMusicX** (流声音乐). Docs are in Chinese; code comments explain the why, not the what.
+> A Windows music player with a desktop lyric overlay, written in WPF on .NET 10. Docs are in Chinese; code comments explain the why, not the what.
 
 ![主界面](docs/screenshots/main-window.png)
 
-| 桌面歌词 | 播放页 |
+| 桌面歌词 | 设置 |
 |---|---|
-| ![桌面歌词](docs/screenshots/desktop-lyrics.png) | ![播放页](docs/screenshots/player-page.png) |
+| ![桌面歌词](docs/screenshots/desktop-lyrics.png) | ![设置](docs/screenshots/settings.png) |
+
+| 播放页 · 浅色封面 | 播放页 · 深色封面 |
+|---|---|
+| ![播放页](docs/screenshots/player-page-light.png) | ![播放页](docs/screenshots/player-page-dark.png) |
 
 ## 能做什么
 
@@ -20,8 +24,6 @@ Windows 桌面音乐播放器 + 桌面歌词。WPF / .NET 10，无安装器、�
 - **主题**：整窗配色由「主色 + 背景色」推导（浅色浅字深字、深色自动反相），背景可以是当前封面。
 - **更新**：版本目录布局（`versions\vX` + `current.txt`），下载新版本时从不覆盖正在运行的文件；清单可签名（HMAC-SHA256），验签失败拒绝安装。
 - **杂项**：歌单、拖拽排序、单曲删除（6 秒撤销）、WSA 播放队列导入（adb）、音量混音器记忆。单击一行播放，再点当前行暂停。
-
-![设置](docs/screenshots/settings.png)
 
 ## 运行
 
@@ -119,15 +121,11 @@ Views/                 主窗口、播放页、桌面歌词、设置、界面外
 Fonts/                 霞鹜文楷（OFL-1.1）
 ```
 
-## 许可
-
-本项目按 **GPL-3.0** 发布（见 [`LICENSE`](LICENSE)）：界面与歌词动效移植自 GPL-3.0 的 CurrentMusicX。
-
-第三方：
+## 第三方
 
 - 霞鹜文楷 LXGW WenKai —— SIL Open Font License 1.1（`Fonts/OFL.txt`）
 - [Jint](https://github.com/sebastienros/jint) —— MIT，用于执行落雪（LX）脚本
 
 ## 免责声明
 
-这是一个个人自用的播放器，**与网易云音乐、CurrentMusicX 均无关联**，也未获其授权。在线功能走的是公开接口，仅供个人学习与自用；请遵守平台服务条款，不要传播下载到的音频。仓库里不含任何音乐文件、歌词或封面。
+这是一个个人自用的播放器，**与网易云音乐无关联**，也未获其授权。在线功能走的是公开接口，仅供个人学习与自用；请遵守平台服务条款，不要传播下载到的音频。仓库里不含任何音乐文件、歌词或封面。

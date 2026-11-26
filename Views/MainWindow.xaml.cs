@@ -2101,7 +2101,9 @@ public partial class MainWindow : Window
         {
             var song = _player.Current;
             txtTitle.Text = song?.DisplayTitle ?? "未在播放";
-            txtArtist.Text = song == null ? "" : $"{song.DisplayArtist} · {song.SourceLabel}";
+            // Artist only: the player bar used to append " · 本地" / " · 网易云", which the user asked to
+            // drop (1.2.68) — the row is about the song, not where it came from.
+            txtArtist.Text = song?.DisplayArtist ?? "";
             imgCover.Source = song?.Cover;
             RefreshCoverBackdrop();
             sldProgress.Maximum = Math.Max(1, song?.Duration.TotalSeconds ?? 0);

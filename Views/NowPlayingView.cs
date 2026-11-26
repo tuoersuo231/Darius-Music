@@ -858,7 +858,7 @@ public sealed class NowPlayingView : Grid
     {
         var song = _player.Current;
         _title.Text = song?.DisplayTitle ?? "未在播放";
-        _artist.Text = song == null ? "" : $"{song.DisplayArtist} · {song.SourceLabel}";
+        _artist.Text = song?.DisplayArtist ?? "";
         _coverBrush.ImageSource = song?.Cover;
         _coverFrame.Background = song?.Cover != null ? _coverBrush : _coverFallback;
         _coverGlyph.Visibility = song?.Cover == null ? Visibility.Visible : Visibility.Collapsed;
