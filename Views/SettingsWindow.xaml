@@ -333,11 +333,6 @@
                             <CheckBox x:Name="chkLocked" Style="{StaticResource Switch}" HorizontalAlignment="Right" VerticalAlignment="Center" />
                         </Grid>
                         <Border Height="1" Background="{DynamicResource HairlineBrush}" />
-                        <Grid Margin="0,12">
-                            <TextBlock Text="窗口置顶" FontSize="13" VerticalAlignment="Center" />
-                            <CheckBox x:Name="chkTopmost" Style="{StaticResource Switch}" HorizontalAlignment="Right" VerticalAlignment="Center" />
-                        </Grid>
-                        <Border Height="1" Background="{DynamicResource HairlineBrush}" />
                         <Grid x:Name="aboveRow" Margin="0,12">
                             <TextBlock Text="显示在其他应用上层" FontSize="13" VerticalAlignment="Center" />
                             <CheckBox x:Name="chkAboveApps" Style="{StaticResource Switch}" HorizontalAlignment="Right" VerticalAlignment="Center" />

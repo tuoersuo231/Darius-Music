@@ -16,6 +16,7 @@ public partial class MainWindow : Window
 {
     private readonly PlayerController _player;
     private readonly AppSettings _settings;
+    private readonly HotkeyManager _hotkeys = new();
     private DesktopLyricsWindow? _desktop;
     private SettingsWindow? _settingsWindow;
     private readonly System.Collections.ObjectModel.ObservableCollection<Song> _view = new();
@@ -39,7 +40,21 @@ public partial class MainWindow : Window
         if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("DARIUS_DATA_DIR")))
             Title = "Darius Music · 测试环境";
 
+        // 背景色=透明 → 真的能看见下层应用。只有一个可靠做法：窗口必须是「分层窗口」
+        // （AllowsTransparency），DWM 才会保留每像素 alpha；普通窗口 + accent 模糊在本机实测
+        // 客户区仍是黑的。分层窗口要求 WindowStyle=None，所以这里自己补拖拽和窗口按钮。
+        _glassMode = Services.Palette.SurfaceAlpha(
+            Services.Palette.Normalize(_settings.ThemeSurface, Services.Palette.DefaultSurface)) < 0xFF;
+        if (_glassMode) EnterGlassMode();
+
         _player.StateChanged += OnStateChanged;
+        // RegisterHotKey needs a real HWND, so the global chords are (re)applied as soon as the handle
+        // exists — OnLoaded also calls ApplyHotkeys(), which is idempotent.
+        SourceInitialized += (_, _) =>
+        {
+            _hotkeys.Attach(this);
+            ApplyHotkeys();
+        };
         // Slider 的类处理器先吃掉 PreviewMouseLeftButtonDown，用 += 挂的处理器收不到按下，
         // _seeking 永远是 false，松手时 EndSeek 就提前返回。统一用 handledEventsToo: true。
         sldProgress.AddHandler(UIElement.PreviewMouseLeftButtonDownEvent,
@@ -60,6 +75,17 @@ public partial class MainWindow : Window
         _player.ViewChanged += OnViewChanged;
         _player.Tick += OnTick;
 
+        // The backdrop picture is sized from the window and the picture's own pixels, so a resize has to
+        // redo that geometry — otherwise the framing drifts away from the no-blur case.
+        SizeChanged += (_, _) =>
+        {
+            if (IsLoaded) ApplyThemeImageGeometry(Math.Clamp(_settings.ThemeBlur, 0, 60));
+        };
+        themeBackdrop.SizeChanged += (_, _) =>
+        {
+            if (IsLoaded) ApplyThemeImageGeometry(Math.Clamp(_settings.ThemeBlur, 0, 60));
+        };
+
         // Typing in the online view runs a server search; wait for the typing to stop so one keyword
         // does not become one request per keystroke.
         _onlineSearchTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(450) };
@@ -71,7 +97,10 @@ public partial class MainWindow : Window
             await _player.ShowOnlineSearchAsync(txtSearch.Text);
         };
 
-        Loaded += OnLoaded;
+        // OnLoaded is wired from MainWindow.xaml; adding it again here ran it TWICE, which made every
+        // hotkey fire twice (F8 flipped the switch on and straight back off, Ctrl+Q likewise, P played
+        // and paused) — the user's "快捷键根本没生效".
+
 
         // Dragging or resizing the window runs a modal loop on this thread. Holding the page's lyric
         // painting for the duration is what makes the window follow the cursor instead of catching up
@@ -127,9 +156,282 @@ public partial class MainWindow : Window
         UpdatePlayModeUi();
         lstPlaylists.ItemsSource = _player.Playlists;
 
+        // 快捷键：修饰键组合和 F1~F24 走系统级注册；只按字母/数字的那些留给窗口自己处理。
+        _hotkeys.Attach(this);
+        _hotkeys.Pressed -= OnHotkey;   // never stack two handlers on one chord
+        _hotkeys.Pressed += OnHotkey;
+        ApplyHotkeys();
+        PreviewKeyDown += OnWindowPreviewKeyDown;
+
         // Local library only: no account, no WSA.
         try { await _player.ShowLibraryAsync(); }
         catch { }
+    }
+
+    private void OnWindowPreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        // Diagnostics only: every legal chord is global now, so nothing here can consume a key.
+        _hotkeys.NoteLocalKey(HotkeyText.NormalizeKey(e), System.Windows.Input.Keyboard.Modifiers);
+    }
+
+    /// <summary>Pushes the five bindings from settings into the registrar. Returns the actions whose
+    /// chord could not be taken (another application already owns it).</summary>
+    private IReadOnlyList<HotkeyAction> ApplyHotkeys()
+    {
+        // OnLoaded already attached, but a retry here keeps the window's message hook alive if the
+        // handle was not ready yet (Attach is a no-op once it is).
+        _hotkeys.Attach(this);
+        var map = new Dictionary<HotkeyAction, string>
+        {
+            [HotkeyAction.AboveApps] = _settings.KeyAboveApps,
+            [HotkeyAction.ToggleLyrics] = _settings.KeyLyrics,
+            [HotkeyAction.PlayPause] = _settings.KeyPlayPause,
+            [HotkeyAction.Next] = _settings.KeyNext,
+            [HotkeyAction.Previous] = _settings.KeyPrevious,
+            [HotkeyAction.TransparentBg] = _settings.KeyTransparentBg,
+        };
+        _hotkeys.Apply(map);
+        return _hotkeys.Failed.ToList();
+    }
+
+    /// <summary>One place where a hotkey turns into the same call a button would make.</summary>
+    private void OnHotkey(HotkeyAction action)
+    {
+        try
+        {
+            switch (action)
+            {
+                case HotkeyAction.AboveApps:
+                    _settings.OverlayAboveApps = !_settings.OverlayAboveApps;
+                    SettingsStore.Save(_settings);
+                    _desktop?.ApplySettings(_settings);
+                    // 「置顶」在普通窗口下看不出任何变化（歌词本来就是 topmost 的，这一项只对全屏/其他
+                    // 置顶窗口起作用），所以必须给一句确认，否则用户只能认为键没反应。
+                    ShowHotkeyToast(_settings.OverlayAboveApps
+                        ? "已置顶：歌词显示在其他应用上方"
+                        : "已取消置顶：歌词回到普通窗口层级");
+                    break;
+                case HotkeyAction.ToggleLyrics:
+                    SetLyricsEnabled(!_settings.Enabled, save: true);
+                    break;
+                case HotkeyAction.PlayPause:
+                    if (_player.Current == null) ShowHotkeyToast("还没有正在播放的歌");
+                    else _player.Toggle();
+                    break;
+                case HotkeyAction.Next:
+                    _player.Next();
+                    break;
+                case HotkeyAction.Previous:
+                    _player.Previous();
+                    break;
+                case HotkeyAction.TransparentBg:
+                {
+                    // 00RRGGBB ↔ RRGGBB：颜色本身留着，只切 alpha。
+                    var surface = Services.Palette.Normalize(_settings.ThemeSurface, Services.Palette.DefaultSurface);
+                    string rgb = surface.Length == 8 ? surface.Substring(2) : surface;
+                    bool wasClear = Services.Palette.SurfaceAlpha(surface) < 0xFF;
+                    _settings.ThemeSurface = wasClear ? rgb : "00" + rgb;
+                    SettingsStore.Save(_settings);
+                    ApplyAppearance();
+                    if (!_glassMode) ShowHotkeyToast("透明背景需要重启后生效");
+                    else ShowHotkeyToast(wasClear ? "背景：实色" : "背景：全透明");
+                    break;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _hotkeyLog.Add($"{DateTime.Now:HH:mm:ss.fff} {action} THREW {ex.GetType().Name}: {ex.Message}");
+            return;
+        }
+        _hotkeyLog.Add($"{DateTime.Now:HH:mm:ss.fff} {action} enabled={_settings.Enabled} " +
+                       $"above={_settings.OverlayAboveApps} playing={_player.PlaybackState} cur={_player.Current?.Title}");
+    }
+
+    private readonly List<string> _hotkeyLog = new();
+
+    private Border? _toast;
+    private DispatcherTimer? _toastTimer;
+
+    /// <summary>Confirmation for a hotkey whose effect is not visible on screen (置顶 / 没有歌可放).
+    /// Prefers the desktop overlay when it is on screen — that is what the user is looking at while
+    /// pressing global keys — and falls back to this window.</summary>
+    internal void ShowHotkeyToast(string text)
+    {
+        if (_desktop is { IsVisible: true })
+        {
+            _desktop.ShowToast(text);
+            return;
+        }
+        ShowToast(text);
+    }
+
+    private void ShowToast(string text)
+    {
+        if (Content is not Grid root) return;
+        if (_toast == null)
+        {
+            var label = new TextBlock
+            {
+                FontSize = 12.5,
+                Foreground = Brushes.White,
+                TextAlignment = TextAlignment.Center,
+            };
+            _toast = new Border
+            {
+                Child = label,
+                Background = new System.Windows.Media.SolidColorBrush(
+                    System.Windows.Media.Color.FromArgb(0xE0, 0x16, 0x14, 0x1E)),
+                BorderBrush = new System.Windows.Media.SolidColorBrush(
+                    System.Windows.Media.Color.FromArgb(0x40, 0xFF, 0xFF, 0xFF)),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(10),
+                Padding = new Thickness(14, 7, 14, 7),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Bottom,
+                Margin = new Thickness(0, 0, 0, 92),
+                IsHitTestVisible = false,
+                Opacity = 0,
+            };
+            Grid.SetColumnSpan(_toast, 2);
+            Panel.SetZIndex(_toast, 60);
+            root.Children.Add(_toast);
+            _toastTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1500) };
+            _toastTimer.Tick += (_, _) =>
+            {
+                _toastTimer!.Stop();
+                if (_toast != null) _toast.Opacity = 0;
+            };
+        }
+        ((TextBlock)_toast.Child).Text = text;
+        _toast.Opacity = 1;
+        _toastTimer!.Stop();
+        _toastTimer.Start();
+    }
+
+    /// <summary>The HWND the global chords were registered on (QA posts WM_HOTKEY straight to it).</summary>
+    public IntPtr DebugHotkeyHandle => _hotkeys.Handle;
+
+    /// <summary>QA (--key-qa): registration state plus every action that actually fired, so a hotkey
+    /// that is bound but silent can be told apart from one that never reaches the app.</summary>
+    public string DebugHotkeys =>
+        $"registered={_hotkeys.RegisteredCount} failed={_hotkeys.Failed.Count} " +
+        $"hwnd={_hotkeys.Handle} hookCalls={_hotkeys.HookCalls} msgs=[{string.Join(";", _hotkeys.MessageLog.TakeLast(4))}] " +
+        $"codes=[{string.Join(",", _hotkeys.FailCodes.Select(kv => $"{kv.Key}={kv.Value}"))}] " +
+        $"keys=[{_hotkeys.LastLocalKey}] log=[{string.Join(" | ", _hotkeyLog)}]";
+
+    /// <summary>Programmatic equivalent of the 桌面歌词 switch, for the hotkey path.</summary>
+    private void SetLyricsEnabled(bool enabled, bool save)
+    {
+        _settings.Enabled = enabled;
+        SetLyricsCheckbox(enabled);
+        if (save) SettingsStore.Save(_settings);
+        if (enabled) ShowDesktopLyrics();
+        else _desktop?.Hide();
+        UpdateOverlayForFocus();
+    }
+
+    private bool _glassMode;
+
+    /// <summary>Layered-window mode, used when 背景色=透明. Borderless (WPF requires it), resizable
+    /// through WindowChrome, with a hand-rolled drag strip and window buttons.</summary>
+    private void EnterGlassMode()
+    {
+        WindowStyle = WindowStyle.None;
+        AllowsTransparency = true;
+        // 1/255 alpha, not 0: a layered window hit-tests per pixel, so a fully transparent client lets
+        // every click fall through to the app below (the window could not even be dragged).
+        Background = new SolidColorBrush(Color.FromArgb(1, 0, 0, 0));
+        ResizeMode = ResizeMode.CanResize;
+        System.Windows.Shell.WindowChrome.SetWindowChrome(this, new System.Windows.Shell.WindowChrome
+        {
+            CaptionHeight = 0,
+            ResizeBorderThickness = new Thickness(7),
+            GlassFrameThickness = new Thickness(0),
+            CornerRadius = new CornerRadius(0),
+            UseAeroCaptionButtons = false,
+        });
+
+        PreviewMouseLeftButtonDown += (_, e) =>
+        {
+            if (e.ButtonState != MouseButtonState.Pressed) return;
+            if (e.GetPosition(this).Y > 46) return;
+            // Buttons / search box / sliders keep their own clicks.
+            if (e.OriginalSource is DependencyObject source && HasClickableAncestor(source)) return;
+            if (e.ClickCount == 2)
+            {
+                WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+                return;
+            }
+            try { DragMove(); } catch { }
+        };
+
+        if (Content is Grid root)
+        {
+            var buttons = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Top,
+                Margin = new Thickness(0, 6, 10, 0),
+            };
+            buttons.Children.Add(WindowButton("—", () =>
+            {
+                WindowState = WindowState.Minimized;
+            }));
+            buttons.Children.Add(WindowButton("✕", Close));
+            Panel.SetZIndex(buttons, 200);
+            root.Children.Add(buttons);
+        }
+    }
+
+    private Button WindowButton(string glyph, Action action)
+    {
+        var button = new Button
+        {
+            Content = new TextBlock { Text = glyph, FontSize = 13 },
+            Width = 30,
+            Height = 24,
+            Margin = new Thickness(4, 0, 0, 0),
+            Background = Brushes.Transparent,
+            BorderThickness = new Thickness(0),
+            Foreground = (Brush)FindResource("TextDimBrush"),
+            Cursor = System.Windows.Input.Cursors.Hand,
+            Focusable = false,
+        };
+        button.Click += (_, _) => action();
+        return button;
+    }
+
+    private static bool HasClickableAncestor(DependencyObject source)
+    {
+        for (DependencyObject? node = source; node != null; node = VisualTreeHelper.GetParent(node))
+        {
+            if (node is Button or TextBox or Slider or ComboBox or CheckBox or ScrollBar or Thumb
+                or ListBoxItem or MenuItem or ToggleButton) return true;
+            if (node is Window) break;
+        }
+        return false;
+    }
+
+    public bool DebugGlassMode => _glassMode;
+
+    private HotkeyWindow? _hotkeyWindow;
+
+    private void OnOpenHotkeysClick(object sender, RoutedEventArgs e)
+    {
+        if (_hotkeyWindow is { IsVisible: true })
+        {
+            _hotkeyWindow.Activate();
+            return;
+        }
+        _hotkeyWindow = new HotkeyWindow(_settings, () =>
+        {
+            SettingsStore.Save(_settings);
+            return ApplyHotkeys();
+        }) { Owner = this };
+        _hotkeyWindow.Closed += (_, _) => _hotkeyWindow = null;
+        _hotkeyWindow.Show();
     }
 
     /// <summary>Switch state is the only thing that decides whether the overlay is on screen.</summary>
@@ -1295,8 +1597,16 @@ public partial class MainWindow : Window
             btnOnline.Background = _player.IsOnlineView
                 ? (System.Windows.Media.Brush)FindResource("NavActiveBrush")
                 : Brushes.Transparent;
-            // The same box filters the list locally and searches the server; the hint says which.
-            txtSearchHint.Text = _player.IsOnlineView ? "搜索网易云音乐…" : "搜索歌曲 / 歌手 / 专辑";
+            // With a transparent background the active pill has no fill at all, so the accent ink is what
+            // says "this is the current view".
+            btnLocal.Foreground = libraryActive
+                ? (System.Windows.Media.Brush)FindResource("AccentBrush")
+                : (System.Windows.Media.Brush)FindResource("TextDimBrush");
+            btnOnline.Foreground = _player.IsOnlineView
+                ? (System.Windows.Media.Brush)FindResource("AccentBrush")
+                : (System.Windows.Media.Brush)FindResource("TextDimBrush");
+            // The same box filters the list locally and searches the server. No placeholder text: the
+            // box keeps just its magnifier icon (user request, 2026-11-27).
             // Leaving the online view must drop its keyword from the shared box: the same text would
             // otherwise filter the library that is being opened next, and a keyword with no local
             // match empties the list. The text is remembered instead of thrown away, so coming back
@@ -1354,6 +1664,16 @@ public partial class MainWindow : Window
     {
         var sb = new System.Text.StringBuilder();
         sb.AppendLine($"window {ActualWidth:0.0}x{ActualHeight:0.0}");
+        sb.AppendLine($"hotkeys registered={_hotkeys.RegisteredCount} failed={_hotkeys.Failed.Count} " +
+                      $"codes=[{string.Join(",", _hotkeys.FailCodes.Select(kv => $"{kv.Key}={kv.Value}"))}] " +
+                      $"binds=[{_settings.KeyAboveApps}|{_settings.KeyLyrics}|{_settings.KeyPlayPause}|{_settings.KeyNext}|{_settings.KeyPrevious}]");
+        // 背景图的实际尺寸/负边距：磨砂变大小时 Width/Height 应该**不变**（只该多露出外围像素），
+        // 以前是 UniformToFill 填满被负边距撑大的盒子，所以磨砂越大图越放大。
+        var bmpSize = (themeImage.Source as BitmapSource);
+        sb.AppendLine($"themeImage w={themeImage.Width:0.0} h={themeImage.Height:0.0} " +
+                      $"margin={themeImage.Margin.Left:0.0} " +
+                      $"src={(bmpSize == null ? "none" : $"{bmpSize.PixelWidth}x{bmpSize.PixelHeight}")} " +
+                      $"blur={_settings.ThemeBlur:0} seeThrough={_seeThrough} geom='{_geomLog}'");
         if (FindName("playerBar") is Grid bar)
         {
             sb.AppendLine($"playerBar {bar.ActualWidth:0.0}x{bar.ActualHeight:0.0} cols=" +
@@ -1852,16 +2172,7 @@ public partial class MainWindow : Window
     private void OnLyricsToggle(object sender, RoutedEventArgs e)
     {
         if (!IsLoaded || _suppressToggle) return;
-        _settings.Enabled = chkLyrics.IsChecked == true;
-        SettingsStore.Save(_settings);
-        if (_settings.Enabled)
-        {
-            ShowDesktopLyrics();
-        }
-        else
-        {
-            _desktop?.Hide();
-        }
+        SetLyricsEnabled(chkLyrics.IsChecked == true, save: true);
     }
 
     // ---------- now playing page (inside this window) ----------
@@ -2218,7 +2529,43 @@ public partial class MainWindow : Window
         double pad = Math.Max(16, blur * 2 + 16);
         var margin = new Thickness(-pad);
         if (themeImage.Margin != margin) themeImage.Margin = margin;
+        // The negative margin exists so that the blur's own edge fade (it samples outside the picture,
+        // so the outermost pixels turn transparent) lands outside the window. UniformToFill then had to
+        // scale the picture up to fill that padded box — which is why 背景磨砂 also *zoomed* the image.
+        // Size the image at the window's own cover scale and let the extra ring show more of the source
+        // instead of a magnified crop, so the framing no longer changes with the blur radius.
+        if (themeImage.Source is not BitmapSource bmp || bmp.PixelWidth <= 0 || bmp.PixelHeight <= 0)
+        {
+            _geomLog = "no-src";
+            return;
+        }
+        double w = themeBackdrop.ActualWidth > 4 ? themeBackdrop.ActualWidth : (Width > 4 ? Width : 0);
+        double h = themeBackdrop.ActualHeight > 4 ? themeBackdrop.ActualHeight : (Height > 4 ? Height : 0);
+        if (w < 4 || h < 4)
+        {
+            _geomLog = $"tiny w={w:0.0} h={h:0.0}";
+            return;
+        }
+        double scale = Math.Max(w / bmp.PixelWidth, h / bmp.PixelHeight);
+        double width = bmp.PixelWidth * scale;
+        double height = bmp.PixelHeight * scale;
+        // NaN != NaN: comparing a never-set Width with a number yields NaN, and NaN > 0.5 is false, so
+        // the assignment below never happened and the image stayed UniformToFill-sized (the zoom).
+        if (double.IsNaN(themeImage.Width) || double.IsNaN(themeImage.Height)
+            || Math.Abs(themeImage.Width - width) > 0.5 || Math.Abs(themeImage.Height - height) > 0.5)
+        {
+            themeImage.Width = width;
+            themeImage.Height = height;
+            _geomLog = $"set {width:0}x{height:0} (window {w:0}x{h:0})";
+        }
     }
+
+    private string _geomLog = "";
+
+    /// <summary>QA: whether the window is in see-through (layered) mode.</summary>
+    public bool DebugSeeThrough => _glassMode && _seeThrough;
+
+    private bool _seeThrough;
 
     /// <summary>Recolours the whole window from the theme colour and rebuilds the backdrop. The
     /// backdrop can be a photo on disk or "当前歌曲封面", which follows the playing track.</summary>
@@ -2230,7 +2577,18 @@ public partial class MainWindow : Window
         string path = !coverMode && raw.Length > 0 && System.IO.File.Exists(raw) ? raw : "";
         bool photo = coverMode || path.Length > 0;
         Services.Palette.Apply(_settings.ThemeAccent, _settings.ThemeSurface, photo);
-        Background = (Brush)FindResource("WindowWashBrush");
+        // 背景色选「透明」（8 位 AARRGGBB，alpha=00）时窗口必须是分层窗口才真的透过去看得到下层应用；
+        // 这个属性只能在窗口创建前决定，所以切换要重启。若现在还不是玻璃窗口，这里先不透明，
+        // 并给一句提示（见下面的 toast）。
+        bool wantSeeThrough = Services.Palette.SurfaceAlpha(
+            Services.Palette.Normalize(_settings.ThemeSurface, Services.Palette.DefaultSurface)) < 0xFF;
+        _seeThrough = wantSeeThrough && _glassMode;
+        // Same 1/255 trick as in the constructor: 0 would make the whole window click-through.
+        Background = _seeThrough
+            ? new SolidColorBrush(Color.FromArgb(1, 0, 0, 0))
+            : (Brush)FindResource("WindowWashBrush");
+        if (wantSeeThrough && !_glassMode)
+            ShowToast("透明背景需要重启后生效");
         // The nav chip and the toolbar keep brush instances, not bindings, so they have to be handed
         // the new palette by hand or they would stay on the colour they were built with.
         btnLocal.Background = _libraryActive ? (Brush)FindResource("NavActiveBrush") : Brushes.Transparent;
@@ -2259,6 +2617,10 @@ public partial class MainWindow : Window
             : null;
         ApplyThemeImageGeometry(blur);
         _themeBlurApplied = blur;
+        // At OnLoaded the window has no measured size yet, so the geometry above bails out; redo it once
+        // layout is done (this is also what makes the first frame already un-zoomed).
+        Dispatcher.BeginInvoke(new Action(() => ApplyThemeImageGeometry(Math.Clamp(_settings.ThemeBlur, 0, 60))),
+            System.Windows.Threading.DispatcherPriority.Loaded);
     }
 
     /// <summary>Song-cover backdrops change with the track, so this runs on every track change.</summary>
@@ -2276,6 +2638,10 @@ public partial class MainWindow : Window
         if (ReferenceEquals(_themeCover, source) && themeImage.Source == source) return;
         _themeCover = source;
         themeImage.Source = source;
+        // The cover-mode backdrop arrives *after* layout (it is loaded from disk / the network), so the
+        // geometry pass in ApplyAppearance always bailed with "no-src" and the image kept whatever size
+        // the previous track had. Re-run it here once the bitmap actually exists.
+        ApplyThemeImageGeometry(_themeBlurApplied);
     }
 
     private static BitmapSource? LoadBitmap(string path)

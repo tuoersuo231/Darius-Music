@@ -41,6 +41,9 @@ public partial class AppearanceWindow : Window
             var hex = SurfacePresets[i];
             surfacePresets.Children.Add(Swatch(hex, SurfaceNames[i], s => s.ThemeSurface = hex));
         }
+        // 透明：面板不再铺自己的底色，封面/背景图整面透出来。存成 8 位 AARRGGBB（"00RRGGBB"），
+        // 颜色本身留着给文字和强调色算对比度。
+        surfacePresets.Children.Add(TransparentSwatch());
 
         sldThemeOpacity.ValueChanged += (_, e) =>
         {
@@ -85,6 +88,56 @@ public partial class AppearanceWindow : Window
         return button;
     }
 
+    /// <summary>The 透明 chip: keeps the current colour (it still drives the ink and the accent) but
+    /// stores it with a zero alpha, which makes every panel paint nothing at all. The checkerboard is
+    /// the usual "no colour" pattern — a plain light chip looked like one more white preset.</summary>
+    private Button TransparentSwatch()
+    {
+        var light = Color.FromRgb(0xE9, 0xEB, 0xEF);
+        var dark = Color.FromRgb(0xC9, 0xCE, 0xD6);
+        var checker = new DrawingBrush
+        {
+            TileMode = TileMode.Tile,
+            Viewport = new Rect(0, 0, 12, 12),
+            ViewportUnits = BrushMappingMode.Absolute,
+            Stretch = Stretch.None,
+            Drawing = new DrawingGroup
+            {
+                Children =
+                {
+                    new GeometryDrawing(new SolidColorBrush(light), null, new RectangleGeometry(new Rect(0, 0, 12, 12))),
+                    new GeometryDrawing(new SolidColorBrush(dark), null, new RectangleGeometry(new Rect(0, 0, 6, 6))),
+                    new GeometryDrawing(new SolidColorBrush(dark), null, new RectangleGeometry(new Rect(6, 6, 6, 6))),
+                },
+            },
+        };
+        var button = new Button
+        {
+            Width = 56,
+            Height = 26,
+            Margin = new Thickness(0, 0, 8, 8),
+            Cursor = System.Windows.Input.Cursors.Hand,
+            Background = checker,
+            BorderBrush = new SolidColorBrush(Color.FromArgb(0x40, 0, 0, 0)),
+            BorderThickness = new Thickness(1),
+            Style = (Style)Application.Current.Resources["GhostButton"],
+            Content = new TextBlock
+            {
+                Text = "透明",
+                FontSize = 11,
+                Foreground = new SolidColorBrush(Color.FromRgb(0x22, 0x25, 0x2B)),
+            },
+        };
+        button.Click += (_, _) =>
+        {
+            var rgb = Services.Palette.Normalize(_settings.ThemeSurface, Services.Palette.DefaultSurface);
+            if (rgb.Length == 8) rgb = rgb.Substring(2);
+            Apply(s => s.ThemeSurface = "00" + rgb);
+            RefreshFields();
+        };
+        return button;
+    }
+
     private void LoadFromSettings()
     {
         txtThemeOpacity.Text = $"{_settings.ThemeOpacity:0}%";
@@ -96,9 +149,12 @@ public partial class AppearanceWindow : Window
 
     private void RefreshFields()
     {
-        txtSurfaceHex.Text = "#" + _settings.ThemeSurface;
-        bdSurface.Background = new SolidColorBrush(
-            Services.Palette.Parse(Services.Palette.Normalize(_settings.ThemeSurface, Services.Palette.DefaultSurface)));
+        string surfaceHex = Services.Palette.Normalize(_settings.ThemeSurface, Services.Palette.DefaultSurface);
+        txtSurfaceHex.Text = "#" + surfaceHex;
+        var preview = Services.Palette.Parse(surfaceHex);
+        // A fully transparent surface would make the preview chip invisible; show it faintly instead.
+        if (preview.A < 0x30) preview = Color.FromArgb(0x30, preview.R, preview.G, preview.B);
+        bdSurface.Background = new SolidColorBrush(preview);
 
         string image = (_settings.ThemeImage ?? "").Trim();
         bool cover = image.Equals(Services.Palette.CoverToken, StringComparison.OrdinalIgnoreCase);

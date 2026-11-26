@@ -66,6 +66,25 @@ public sealed class AppSettings
     /// opaque lyric panel parked over every application is not something anyone wants.</summary>
     public bool OverlayAboveApps { get; set; } = false;
 
+    // ---- 快捷键（「一个修饰键 + 一个按键」，F1~F12 可单开；见 Services/Hotkeys.cs） ----
+    /// <summary>One source of truth for the five defaults; the settings page and the QA modes read
+    /// these instead of repeating the strings.</summary>
+    public const string DefaultKeyAboveApps = "Ctrl+Q";
+    public const string DefaultKeyLyrics = "F8";
+    /// <summary>Ctrl+P since 1.2.60. It used to be a bare 「P」, which was window-local — pressing it
+    /// while another application had focus did nothing, i.e. play/pause felt broken.</summary>
+    public const string DefaultKeyPlayPause = "Ctrl+P";
+    public const string DefaultKeyNext = "F6";
+    public const string DefaultKeyPrevious = "F7";
+
+    public string KeyAboveApps { get; set; } = DefaultKeyAboveApps;
+    public string KeyLyrics { get; set; } = DefaultKeyLyrics;
+    public string KeyPlayPause { get; set; } = DefaultKeyPlayPause;
+    public string KeyNext { get; set; } = DefaultKeyNext;
+    public string KeyPrevious { get; set; } = DefaultKeyPrevious;
+    /// <summary>背景色「实色 ↔ 全透明」切换。默认空 = 不绑定，由用户自己在快捷键页设置。</summary>
+    public string KeyTransparentBg { get; set; } = "";
+
     // ---- 界面外观（整个窗口共用） ----
     public string ThemeAccent { get; set; } = Palette.DefaultAccent;   // 主色
     public string ThemeSurface { get; set; } = Palette.DefaultSurface; // 背景色
@@ -219,6 +238,16 @@ public sealed class AppSettings
         Locked = Locked,
         Topmost = Topmost,
         OverlayAboveApps = OverlayAboveApps && BackdropMode == BackdropMode.Transparent,
+        // 快捷键本身以前根本没有参与 Normalized()，而 Normalized() 在每次 Load 和 Save 都会被调用 —
+        // 于是用户改过的键当场写进文件成了默认值，重启后又变回默认值，看起来就是「改不了」。
+        // 同时这里顺带规范化：旧版残留的裸字母（"P"）不再合法，会换成新的默认值 "Ctrl+P"。
+        KeyAboveApps = HotkeyText.NormalizeOrDefault(KeyAboveApps, DefaultKeyAboveApps),
+        KeyLyrics = HotkeyText.NormalizeOrDefault(KeyLyrics, DefaultKeyLyrics),
+        KeyPlayPause = HotkeyText.NormalizeOrDefault(KeyPlayPause, DefaultKeyPlayPause),
+        KeyNext = HotkeyText.NormalizeOrDefault(KeyNext, DefaultKeyNext),
+        KeyPrevious = HotkeyText.NormalizeOrDefault(KeyPrevious, DefaultKeyPrevious),
+        // Empty is legal here: this one has no default chord on purpose.
+        KeyTransparentBg = HotkeyText.NormalizeOrDefault(KeyTransparentBg, ""),
         ThemeAccent = Palette.Normalize(ThemeAccent, Palette.DefaultAccent),
         ThemeSurface = Palette.Normalize(ThemeSurface, Palette.DefaultSurface),
         ThemeOpacity = Math.Clamp(ThemeOpacity, 0, 100),

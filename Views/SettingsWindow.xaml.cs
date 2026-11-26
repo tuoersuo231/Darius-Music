@@ -36,8 +36,6 @@ public partial class SettingsWindow : Window
         chkGlow.Unchecked += (_, _) => Apply(s => s.GlowEnabled = false);
         chkLocked.Checked += (_, _) => Apply(s => s.Locked = true);
         chkLocked.Unchecked += (_, _) => Apply(s => s.Locked = false);
-        chkTopmost.Checked += (_, _) => Apply(s => s.Topmost = true);
-        chkTopmost.Unchecked += (_, _) => Apply(s => s.Topmost = false);
         chkAboveApps.Checked += (_, _) => { if (!_syncingUi) Apply(s => s.OverlayAboveApps = true); };
         chkAboveApps.Unchecked += (_, _) => { if (!_syncingUi) Apply(s => s.OverlayAboveApps = false); };
         sldTilt.ValueChanged += (_, _) =>
@@ -83,7 +81,6 @@ public partial class SettingsWindow : Window
         chkTranslation.IsChecked = _settings.Translation;
         chkGlow.IsChecked = _settings.GlowEnabled;
         chkLocked.IsChecked = _settings.Locked;
-        chkTopmost.IsChecked = _settings.Topmost;
         chkAboveApps.IsChecked = _settings.OverlayAboveApps;
         chkPerspective.IsChecked = _settings.Perspective;
         sldTilt.Value = _settings.TiltAngle;

@@ -302,20 +302,172 @@ public static class NeteaseApi
         return new UrlResult(string.IsNullOrEmpty(url) ? null : Upgrade(url), actualLevel, code, expi, trial, error);
     }
 
+    /// <summary>Raw `song/lyric` response: `lrc` (line level), `yrc` (word level for songs that have
+    /// it), `klyric` (karaoke), `tlyric` (translation). The request has to ask for `yv` explicitly —
+    /// without it the API only returns line-level LRC, which is what made the karaoke sweep advance at
+    /// a constant rate instead of following the singing.</summary>
+    internal static async Task<JsonObject?> LyricRootAsync(long id, CancellationToken token = default)
+    {
+        var payload = new JsonObject
+        {
+            ["id"] = id, ["lv"] = -1, ["kv"] = -1, ["tv"] = -1, ["yv"] = -1, ["ytv"] = -1, ["rv"] = -1,
+        };
+        var root = await PostAsync("song/lyric", payload, token);
+        if (root != null && (root["lrc"] != null || root["yrc"] != null || root["klyric"] != null)) return root;
+        return await PostAsync("lyric", payload, token) ?? root;
+    }
+
     /// <summary>Lyrics in LRC form (translated lines merged as the second text), or null.</summary>
     public static async Task<string?> LyricAsync(long id, CancellationToken token = default)
     {
-        var payload = new JsonObject { ["id"] = id, ["lv"] = -1, ["kv"] = -1, ["tv"] = -1 };
-        var root = await PostAsync("song/lyric", payload, token);
-        if (root != null)
+        var root = await LyricRootAsync(id, token);
+        if (root == null) return null;
+        // Prefer the word-level form: `yrc` carries a (startMs,durationMs) pair per cluster, so the
+        // karaoke follows the actual vocal. Plain `lrc` has line stamps only, which the renderer has to
+        // spread evenly — that is the "匀速" the user sees on online tracks.
+        foreach (var key in new[] { "yrc", "klyric", "lrc" })
         {
-            var lrc = (root["lrc"] as JsonObject)?["lyric"]?.GetValue<string>();
-            if (!string.IsNullOrWhiteSpace(lrc)) return lrc;
+            var text = (root[key] as JsonObject)?["lyric"]?.GetValue<string>();
+            if (string.IsNullOrWhiteSpace(text)) continue;
+            var converted = key == "lrc" ? text : WordTimedToLrc(text);
+            if (!string.IsNullOrWhiteSpace(converted)) return converted;
         }
-        var legacy = await PostAsync("lyric", new JsonObject { ["id"] = id, ["lv"] = -1, ["kv"] = -1, ["tv"] = -1 }, token);
-        if (legacy == null) return null;
-        var fallback = (legacy["lrc"] as JsonObject)?["lyric"]?.GetValue<string>();
-        return string.IsNullOrWhiteSpace(fallback) ? null : fallback;
+        return null;
+    }
+
+    /// <summary>Turns a word-timed body into the enhanced LRC our parser already understands.
+    /// NetEase `yrc` looks like `[00:12.345](12345,800,0)こんにちは`, one `(startMs,durationMs,flag)`
+    /// per cluster; some catalogues use `<startMs,duration>` instead. Both are rewritten to
+    /// `[00:12.345]&lt;00:12.345&gt;こんにちは…` and the line's own stamp stays authoritative.
+    /// Lines without per-cluster timing (metadata, instrumental, plain LRC) are passed through.</summary>
+    internal static string WordTimedToLrc(string text)
+    {
+        var output = new StringBuilder(text.Length + 256);
+        foreach (var rawLine in text.Split('\n'))
+        {
+            var line = rawLine.TrimEnd('\r');
+            if (line.Length == 0) { output.Append('\n'); continue; }
+            int close = line.StartsWith('[') ? line.IndexOf(']') : -1;
+            if (close < 0 || !TryLineStamp(line.AsSpan(0, close + 1), out long lineMs))
+            {
+                output.Append(line).Append('\n');
+                continue;
+            }
+            var body = line[(close + 1)..];
+            if (body.IndexOf('(') < 0 && body.IndexOf('<') < 0)
+            {
+                output.Append(line).Append('\n');
+                continue;
+            }
+
+            var stamps = new List<(long ms, long dur, int end)>();   // absolute start, duration, body offset after the marker
+            int cursor = 0;
+            while (cursor < body.Length)
+            {
+                char c = body[cursor];
+                if (c != '(' && c != '<') { cursor++; continue; }
+                if (TryCluster(body, cursor, out long startMs, out long durMs, out int after))
+                {
+                    stamps.Add((startMs, durMs, after));
+                    cursor = after;
+                    continue;
+                }
+                cursor++;
+            }
+            if (stamps.Count == 0)
+            {
+                output.Append(line).Append('\n');
+                continue;
+            }
+
+            output.Append('[').Append(Stamp(lineMs)).Append(']');
+            for (int i = 0; i < stamps.Count; i++)
+            {
+                int textStart = stamps[i].end;
+                int textEnd = i + 1 < stamps.Count ? stamps[i].end : body.Length;
+                if (i + 1 < stamps.Count)
+                {
+                    // The next marker's own offset already points past its parenthesis, so the text of
+                    // this cluster runs from here to wherever the next marker begins.
+                    int nextMarker = body.IndexOfAny(new[] { '(', '<' }, textStart);
+                    textEnd = nextMarker < 0 ? body.Length : nextMarker;
+                }
+                var chunk = body[textStart..textEnd];
+                output.Append('<').Append(Stamp(stamps[i].ms)).Append('>').Append(chunk);
+            }
+            // Close the last cluster with its own duration, otherwise the tail of a held note finishes at
+            // an arbitrary +800 ms and the sweep snaps to full mid-note.
+            long lastDur = stamps[^1].dur;
+            if (lastDur > 0)
+                output.Append('<').Append(Stamp(stamps[^1].ms + lastDur)).Append('>');
+            output.Append('\n');
+        }
+        return output.ToString();
+    }
+
+    /// <summary>One cluster marker: `(startMs,durMs,flag)`, `&lt;startMs,durMs&gt;` or `&lt;mm:ss.xxx&gt;`.</summary>
+    private static bool TryCluster(string body, int at, out long startMs, out long durMs, out int after)
+    {
+        startMs = 0; durMs = 0; after = at;
+        char open = body[at];
+        char shut = open == '(' ? ')' : '>';
+        int end = body.IndexOf(shut, at + 1);
+        if (end < 0) return false;
+        var inner = body.AsSpan(at + 1, end - at - 1).Trim();
+        if (inner.Length == 0) return false;
+        if (open == '<' && TryStamp(body.AsSpan(at, end - at + 1), out long stamped))
+        {
+            startMs = stamped; durMs = 0; after = end + 1;
+            return true;
+        }
+        var parts = inner.ToString().Split(',');
+        if (parts.Length < 2) return false;
+        if (!long.TryParse(parts[0].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out startMs)) return false;
+        long.TryParse(parts[1].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out durMs);
+        after = end + 1;
+        return true;
+    }
+
+    private static string Stamp(long ms) =>
+        string.Format(CultureInfo.InvariantCulture, "{0:00}:{1:00}.{2:000}",
+            Math.Max(0, ms) / 60000, Math.Max(0, ms) / 1000 % 60, Math.Max(0, ms) % 1000);
+
+    /// <summary>`[mm:ss.xxx]` / `&lt;mm:ss.xxx&gt;` → milliseconds.</summary>
+    private static bool TryStamp(ReadOnlySpan<char> token, out long ms)
+    {
+        ms = 0;
+        if (token.Length < 5) return false;
+        if (token[0] != '[' && token[0] != '<') return false;
+        if (token[^1] != ']' && token[^1] != '>') return false;
+        var core = token[1..^1];
+        int colon = core.IndexOf(':');
+        if (colon <= 0) return false;
+        if (!int.TryParse(core[..colon], NumberStyles.Integer, CultureInfo.InvariantCulture, out int minutes)) return false;
+        var rest = core[(colon + 1)..];
+        int dot = rest.IndexOfAny(new[] { '.', ':' });
+        string secText = dot < 0 ? rest.ToString() : rest[..dot].ToString();
+        string fracText = dot < 0 ? "" : rest[(dot + 1)..].ToString();
+        if (!int.TryParse(secText, NumberStyles.Integer, CultureInfo.InvariantCulture, out int seconds)) return false;
+        int frac = 0;
+        if (fracText.Length > 0)
+        {
+            if (!int.TryParse(fracText, NumberStyles.Integer, CultureInfo.InvariantCulture, out frac)) return false;
+            frac = fracText.Length switch { 1 => frac * 100, 2 => frac * 10, 3 => frac, _ => fracText.Length > 3 ? frac / 10 : frac };
+        }
+        ms = minutes * 60000L + seconds * 1000L + frac;
+        return true;
+    }
+
+    /// <summary>Line stamp: `[mm:ss.xxx]` (LRC) or `[startMs,durationMs]` (NetEase `yrc`).</summary>
+    private static bool TryLineStamp(ReadOnlySpan<char> token, out long ms)
+    {
+        if (TryStamp(token, out ms)) return true;
+        ms = 0;
+        if (token.Length < 4 || token[0] != '[' || token[^1] != ']') return false;
+        var inner = token[1..^1];
+        int comma = inner.IndexOf(',');
+        if (comma <= 0) return false;
+        return long.TryParse(inner[..comma], NumberStyles.Integer, CultureInfo.InvariantCulture, out ms);
     }
 
     private static string? Upgrade(string? url)

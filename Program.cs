@@ -1,4 +1,5 @@
 using System.IO;
+using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -414,6 +415,63 @@ public static class Program
             var c3 = Count(dragged);
             report.Add($"drag 40 steps  avg={dragClock.Elapsed.TotalMilliseconds / 40:0.0} ms worst={worst:0.0} ms final white={c3.white} red={c3.red}");
             File.WriteAllLines(Path.Combine(tcDir, "text-color.txt"), report);
+            return;
+        }
+        if (args.Contains("--key-qa"))
+        {
+            RunKeyQa(app, args, settings);
+            return;
+        }
+        if (args.Contains("--hotkey-shot"))
+        {
+            string path = Arg(args, "--hotkey-shot") ?? "hotkeys.png";
+            var win = new HotkeyWindow(settings, () => new List<HotkeyAction>());
+            win.Show();
+            app.Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
+            for (int i = 0; i < 4; i++) Pump(app, 120);
+            Save(win, path);
+            win.Close();
+            app.Shutdown();
+            return;
+        }
+        if (args.Contains("--hotkey-qa"))
+        {
+            RunHotkeyQa(app, args, settings);
+            return;
+        }
+        if (args.Contains("--hotkey-capture-qa"))
+        {
+            RunHotkeyCaptureQa(app, args, settings);
+            return;
+        }
+        if (args.Contains("--toast-qa"))
+        {
+            RunToastQa(app, args, settings);
+            return;
+        }
+        if (args.Contains("--rival-window"))
+        {
+            RunRivalWindow(app, args);
+            return;
+        }
+        if (args.Contains("--transparent-live"))
+        {
+            RunTransparentLive(app, args, settings);
+            return;
+        }
+        if (args.Contains("--lyric-dump"))
+        {
+            RunLyricDump(args);
+            return;
+        }
+        if (args.Contains("--above-qa"))
+        {
+            RunAboveQa(app, args, settings);
+            return;
+        }
+        if (args.Contains("--lyric-probe"))
+        {
+            RunLyricProbe(args);
             return;
         }
         if (args.Contains("--shot"))
@@ -1689,6 +1747,14 @@ public static class Program
                            $"window={appearance.ActualWidth:0}x{appearance.ActualHeight:0}");
             }
             File.WriteAllLines(Path.Combine(dir, "appearance.txt"), aLines);
+            Save(appearance, Path.Combine(dir, "appearance.png"));
+            // 背景色那一排（含 透明）在整页最底下，先滚到底再截一张。
+            if (FindDescendant<System.Windows.Controls.ScrollViewer>(appearance) is { } appearanceScroll)
+            {
+                appearanceScroll.ScrollToEnd();
+                Pump(app, 200);
+                Save(appearance, Path.Combine(dir, "appearance-bottom.png"));
+            }
             appearance.Close();
             probeWindow.Close();
             app.Shutdown();
@@ -2699,12 +2765,702 @@ public static class Program
         window.Show();
         window.SetDemoPosition(position);
         app.Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
+            // QA: DARIUS_TOAST="..." renders the 快捷键 confirmation on the overlay, so its size/placement
+        // can be judged against the lyric column instead of guessed.
+        if (Environment.GetEnvironmentVariable("DARIUS_TOAST") is { Length: > 0 } toastText)
+        {
+            window.ShowToast(toastText);
+            for (int i = 0; i < 3; i++) Pump(app, 120);
+        }
         window.RenderPreview(path);
         window.Close();
         app.Shutdown();
     }
 
+    /// <summary>QA: the main-window half of the hotkey confirmation (used when the desktop overlay is
+    /// not on screen). Renders it once so its placement can be seen, not assumed.</summary>
+    private static void RunToastQa(Application app, string[] args, AppSettings settings)
+    {
+        string path = Arg(args, "--toast-qa") ?? "toast.png";
+        // Desktop lyrics off, so the confirmation has to use the main window (the other branch shows it
+        // on the overlay instead).
+        settings.Enabled = false;
+        var ctl = new PlayerController(settings);
+        var win = new MainWindow(ctl)
+        {
+            WindowStartupLocation = WindowStartupLocation.Manual,
+            Left = 40, Top = 40, Width = 1180, Height = 760,
+        };
+        win.Show();
+        win.Activate();
+        PumpFrames(600);
+            win.ShowHotkeyToast("已置顶：歌词显示在其他应用上方");
+        for (int i = 0; i < 4; i++) Pump(app, 120);
+        Save(win, path);
+        win.Close();
+        app.Shutdown();
+    }
+
+    /// <summary>A foreign-looking topmost window used by --above-qa. It keeps re-raising itself every
+        /// 400 ms, which is the hard case for 「显示在其他应用上方」(games / media players do exactly that).
+    /// It has to be a second process: DesktopLyricsWindow deliberately stands down while a window of
+    /// this same app is active (OwnWindowActive).</summary>
+    private static void RunRivalWindow(Application app, string[] args)
+    {
+        int ms = int.TryParse(Arg(args, "--rival-window"), out var v) ? v : 8000;
+        string title = Arg(args, "--title") ?? "DariusRival";
+        var win = new Window
+        {
+            Title = title,
+            Width = 700,
+            Height = 460,
+            Left = 420,
+            Top = 260,
+            Topmost = true,
+            ShowInTaskbar = true,
+            Background = new SolidColorBrush(Color.FromRgb(0x2C, 0x7A, 0x46)),
+        };
+        win.Show();
+        win.Activate();
+        var hwnd = new System.Windows.Interop.WindowInteropHelper(win).Handle;
+        int every = int.TryParse(Arg(args, "--raise-every"), out var rv) ? rv : 0;
+        // There is no app.Run() on this path (QA modes drive the dispatcher by hand), so the window is
+        // kept alive by this loop. --raise-every 0 = raise once, like a real app going fullscreen.
+        var first = true;
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        while (clock.ElapsedMilliseconds < ms)
+        {
+            if (first || (every > 0 && clock.ElapsedMilliseconds % every < 300))
+            {
+                NativeMethods.SetWindowPos(hwnd, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
+                    NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+                first = false;
+            }
+            Pump(app, 300);
+        }
+        win.Close();
+        app.Shutdown();
+    }
+
+    /// <summary>
+        /// QA for 「显示在其他应用上方」: does the overlay really stay above ANOTHER PROCESS' topmost window,
+    /// and does it climb back after that window re-raises itself? A plain topmost window cannot do that,
+        /// which is exactly what the toggle is for. Prints both z-order positions, so "生效/没生效" is a
+    /// number instead of a guess.
+    /// </summary>
+    private static void RunAboveQa(Application app, string[] args, AppSettings settings)
+    {
+        string dir = Arg(args, "--above-qa") ?? "above";
+        Directory.CreateDirectory(dir);
+        var lines = new List<string>();
+
+        settings.Enabled = true;
+        settings.Topmost = true;
+        settings.BackdropMode = BackdropMode.Transparent;
+        settings.OverlayAboveApps = true;
+
+        var ctl = new PlayerController(settings);
+        ctl.LoadDemo(LrcParser.Demo(), DemoCover());
+        var overlay = new DesktopLyricsWindow(ctl, settings)
+        {
+            WindowStartupLocation = WindowStartupLocation.Manual,
+            Left = 120,
+            Top = 140,
+        };
+        overlay.Show();
+        app.Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
+        Pump(app, 700);
+        IntPtr mine = new System.Windows.Interop.WindowInteropHelper(overlay).Handle;
+
+        static (int mine, int rival, int count, IntPtr rivalNow) ZOrder(IntPtr a, IntPtr b)
+        {
+            var order = new List<IntPtr>(512);
+            NativeMethods.EnumWindows((h, _) => { order.Add(h); return true; }, IntPtr.Zero);
+            int zRival = order.IndexOf(b);
+            IntPtr rivalNow = b;
+            if (zRival < 0)
+            {
+                // The handle can change when a window is recreated; fall back to the title.
+                for (int i = 0; i < order.Count; i++)
+                {
+                    var sb = new System.Text.StringBuilder(64);
+                    NativeMethods.GetWindowText(order[i], sb, sb.Capacity);
+                    if (sb.ToString() == "DariusRival") { zRival = i; rivalNow = order[i]; break; }
+                }
+            }
+            return (order.IndexOf(a), zRival, order.Count, rivalNow);
+        }
+
+        string exe = Environment.ProcessPath ?? "Darius Music.exe";
+        System.Diagnostics.Process? rivalProcess = null;
+        IntPtr rival = IntPtr.Zero;
+
+        IntPtr StartRival(int ms, int raiseEvery)
+        {
+            rivalProcess = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(exe)
+            {
+                Arguments = $"--rival-window {ms} --title DariusRival --raise-every {raiseEvery}",
+                UseShellExecute = false,
+            });
+            IntPtr found = IntPtr.Zero;
+            for (int i = 0; i < 80 && found == IntPtr.Zero; i++)
+            {
+                Pump(app, 50);
+                try { rivalProcess?.Refresh(); } catch { }
+                if (rivalProcess is { HasExited: false } && rivalProcess.MainWindowHandle != IntPtr.Zero)
+                    found = rivalProcess.MainWindowHandle;
+            }
+            return found != IntPtr.Zero ? found : NativeMethods.FindWindow(null, "DariusRival");
+        }
+
+        rival = StartRival(4000, 0);
+        lines.Add($"hwnd overlay={mine} rival={rival} (rival = separate process, topmost)");
+        try { if (rivalProcess is { HasExited: false }) rivalProcess.Kill(); } catch { }
+        Pump(app, 400);
+
+        bool Measure(string label)
+        {
+            // A REAL dispatcher frame, not Dispatcher.Invoke: the overlay's watchdog is a
+            // DispatcherTimer and the foreground hook is delivered as a message, and neither runs
+            // inside a nested frame pushed at Render priority (that made every earlier measurement
+            // report "not above" for a feature that only looked dead).
+            PumpFrames(1600);
+            var (zMine, zRival, count, rivalNow) = ZOrder(mine, rival);
+            bool above = zMine >= 0 && zRival >= 0 && zMine < zRival;
+            try { rivalProcess?.Refresh(); } catch { }
+            int exStyle = NativeMethods.GetWindowLong(mine, NativeMethods.GWL_EXSTYLE);
+            lines.Add($"{label}: z(overlay)={zMine} z(rival)={zRival} rivalNow={rivalNow} " +
+                      $"rivalExited={rivalProcess?.HasExited} windows={count} overlayAbove={above} " +
+                      $"topmost={overlay.Topmost} wsExTopmost={(exStyle & 0x0008) != 0} " +
+                      $"settingsAbove={settings.OverlayAboveApps} | {overlay.DebugAboveState}");
+            return above;
+        }
+
+        bool Phase(string label, bool above, bool topmost, int raiseEvery)
+        {
+            settings.OverlayAboveApps = above;
+            settings.Topmost = topmost;
+            overlay.ApplySettings(settings);
+            Pump(app, 300);
+            rival = StartRival(12000, raiseEvery);
+            bool ok = Measure(label);
+            try { if (rivalProcess is { HasExited: false }) rivalProcess.Kill(); } catch { }
+            Pump(app, 400);
+            return ok;
+        }
+
+        bool onAbove = Phase("A above=ON  (topmost=ON,  rival raises once)", true, true, 0);
+        bool onReRaise = Phase("B above=ON  (rival re-raises every 400 ms)", true, true, 400);
+        bool offAbove = Phase("C above=OFF (topmost=ON,  rival raises once)", false, true, 0);
+        bool plainAbove = Phase("D above=OFF + topmost=OFF", false, false, 0);
+
+        lines.Add($"summary: A_on={onAbove} B_on_reraise={onReRaise} C_off={offAbove} D_off_both={plainAbove}");
+
+        // E: the raw primitive, no hook/watchdog involved — proves whether SetWindowPos(HWND_TOPMOST)
+        // can even put this window above the rival. If it can, the bug is in the trigger; if it cannot,
+        // the bug is in the window's style.
+        settings.OverlayAboveApps = true;
+        settings.Topmost = true;
+        overlay.ApplySettings(settings);
+        Pump(app, 200);
+        rival = StartRival(8000, 0);
+        Pump(app, 600);
+        NativeMethods.SetWindowPos(mine, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
+            NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+        bool forced = Measure("E forced SetWindowPos(HWND_TOPMOST)");
+
+        // F: the exact complaint — turning the switch OFF has to drop the overlay at once, without
+        // switching windows. Measured 150 ms after the change, not after the watchdog interval.
+        settings.OverlayAboveApps = true;
+        overlay.ApplySettings(settings);
+        PumpFrames(300);
+        rival = StartRival(8000, 0);
+        PumpFrames(1600);
+        settings.OverlayAboveApps = false;
+        overlay.ApplySettings(settings);
+        PumpFrames(150);
+        var (zOff, zRivalOff, _, _) = ZOrder(mine, rival);
+        bool immediateOff = zOff >= 0 && zRivalOff >= 0 && zOff > zRivalOff;
+        lines.Add($"F switch-off 150 ms later: z(overlay)={zOff} z(rival)={zRivalOff} " +
+                  $"dropped={immediateOff} topmost={overlay.Topmost}");
+        lines.Add($"summary2: E_forced={forced} F_immediate_off={immediateOff}");
+        Save(overlay, Path.Combine(dir, "above.png"));
+        overlay.Close();
+        File.WriteAllLines(Path.Combine(dir, "above.txt"), lines);
+        app.Shutdown();
+    }
+
+    /// <summary>QA: parse one .lrc and print what each cue became — text, translation, whether it is
+    /// marked translation-only, and its word count. This is how "没开翻译却出现中文" gets traced to a
+    /// specific pair of cues instead of guessed at.</summary>
+    private static void RunLyricDump(string[] args)
+    {
+        string lrc = Arg(args, "--lyric-dump") ?? "";
+        string outFile = Arg(args, "--out") ?? Path.Combine(Path.GetTempPath(), "lyric-dump.txt");
+        var lines = new List<string> { $"file={lrc}" };
+        var doc = LrcParser.LoadFor(lrc);
+        if (doc == null) lines.Add("parse=null");
+        else
+        {
+            lines.Add($"cues={doc.Lines.Count}");
+            foreach (var line in doc.Lines.Take(4000))
+            {
+                lines.Add($"{line.StartMs,7}-{line.EndMs,7} words={line.Words.Count,-2} " +
+                          $"trOnly={(line.TranslationOnly ? 1 : 0)} text='{line.Text}' " +
+                          (line.Translation.Length > 0 ? $"tr='{line.Translation}'" : ""));
+            }
+        }
+        File.WriteAllLines(outFile, lines);
+        Application.Current?.Shutdown();
+    }
+
+    /// <summary>QA: does 背景色=透明 really let the desktop show through? Puts a magenta window behind,
+    /// opens the real main window on top of it and captures the SCREEN (not the visual tree) — a
+    /// RenderTargetBitmap can only prove our own pixels are transparent, not that DWM composites them.</summary>
+    private static void RunTransparentLive(Application app, string[] args, AppSettings settings)
+    {
+        string path = Arg(args, "--transparent-live") ?? "transparent.png";
+        settings.Enabled = false;
+        settings.ThemeSurface = "00110E19";
+        settings.ThemeImage = "";
+        settings.ThemeBlur = 0;
+
+        var flat = new Window
+        {
+            WindowStyle = WindowStyle.None,
+            ResizeMode = ResizeMode.NoResize,
+            Background = new SolidColorBrush(Color.FromRgb(0xFF, 0x00, 0xFF)),
+            ShowInTaskbar = false,
+            // Topmost: the desktop may be showing a fullscreen video (exclusive surfaces swallow
+            // everything below), and the measurement needs a known colour behind our window.
+            Topmost = true,
+            WindowStartupLocation = WindowStartupLocation.Manual,
+            Left = SystemParameters.VirtualScreenLeft,
+            Top = SystemParameters.VirtualScreenTop,
+            Width = SystemParameters.VirtualScreenWidth,
+            Height = SystemParameters.VirtualScreenHeight,
+        };
+        flat.Show();
+        Pump(app, 300);
+        if (Environment.GetEnvironmentVariable("DARIUS_NO_FLAT") == "1") flat.Hide();
+
+        var ctl = new PlayerController(settings);
+        var win = new MainWindow(ctl)
+        {
+            WindowStartupLocation = WindowStartupLocation.Manual,
+            Left = 140,
+            Top = 90,
+            Width = 1180,
+            Height = 760,
+            // Set before Show: changing Topmost afterwards re-applies the frame and can drop the accent.
+            Topmost = true,
+        };
+        win.Show();
+        win.Activate();
+        PumpFrames(2000);
+
+        var dpi = VisualTreeHelper.GetDpi(win);
+        int x = (int)Math.Round(win.Left * dpi.DpiScaleX) + 2;
+        int y = (int)Math.Round(win.Top * dpi.DpiScaleY) + 40;   // skip the native caption
+        int w = (int)Math.Round(win.ActualWidth * dpi.DpiScaleX) - 4;
+        int h = (int)Math.Round((win.ActualHeight - 40) * dpi.DpiScaleY) - 4;
+        using (var bmp = new System.Drawing.Bitmap(Math.Max(1, w), Math.Max(1, h)))
+        using (var g = System.Drawing.Graphics.FromImage(bmp))
+        {
+            g.CopyFromScreen(x, y, 0, 0, new System.Drawing.Size(Math.Max(1, w), Math.Max(1, h)));
+            bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+        }
+        File.WriteAllText(path + ".txt",
+            $"seeThrough={win.DebugSeeThrough} rect={x},{y} {w}x{h} surface={settings.ThemeSurface} dpi={dpi.DpiScaleX:0.##} " +
+            $"win={win.Left:0},{win.Top:0} {win.ActualWidth:0}x{win.ActualHeight:0} visible={win.IsVisible} active={win.IsActive} " +
+            $"flat={flat.Left:0},{flat.Top:0} {flat.ActualWidth:0}x{flat.ActualHeight:0} flatVisible={flat.IsVisible}");
+        // Full screen as well: makes "the window was never on screen" obvious at a glance.
+        var vs = new System.Drawing.Bitmap(
+            Math.Max(1, (int)(SystemParameters.VirtualScreenWidth * dpi.DpiScaleX)),
+            Math.Max(1, (int)(SystemParameters.VirtualScreenHeight * dpi.DpiScaleY)));
+        using (var g = System.Drawing.Graphics.FromImage(vs))
+        {
+            g.CopyFromScreen((int)SystemParameters.VirtualScreenLeft, (int)SystemParameters.VirtualScreenTop, 0, 0,
+                new System.Drawing.Size(vs.Width, vs.Height));
+            vs.Save(path.Replace(".png", "-screen.png"), System.Drawing.Imaging.ImageFormat.Png);
+        }
+        win.Close();
+        flat.Close();
+        app.Shutdown();
+    }
+
     /// <summary>End-to-end check: real media, real LRC, real overlay.</summary>
+        /// <summary>QA for 快捷键 end to end: builds the REAL MainWindow, then presses the keys through
+    /// the OS (keybd_event) instead of posting messages, and prints what each one did. This is the only
+    /// way to tell "registered but the OS never delivers it" apart from "delivered but the action is a
+    /// no-op".</summary>
+    private static void RunKeyQa(Application app, string[] args, AppSettings settings)
+    {
+        string dir = Arg(args, "--key-qa") ?? "keyqa";
+        Directory.CreateDirectory(dir);
+        var lines = new List<string>();
+        // QA override so a chord that some other program already owns cannot block the test:
+        // --key-binds "Alt+F9,Alt+F10,Alt+F11,Alt+F12" (above / lyrics / play / next / prev, 4 or 5 items).
+        var overrideBinds = (Arg(args, "--key-binds") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries);
+        if (overrideBinds.Length >= 4)
+        {
+            settings.KeyAboveApps = overrideBinds[0].Trim();
+            settings.KeyLyrics = overrideBinds[1].Trim();
+            settings.KeyPlayPause = overrideBinds[2].Trim();
+            if (overrideBinds.Length > 3) settings.KeyNext = overrideBinds[3].Trim();
+            if (overrideBinds.Length > 4) settings.KeyPrevious = overrideBinds[4].Trim();
+            lines.Add($"binds overridden: {settings.KeyAboveApps} / {settings.KeyLyrics} / " +
+                      $"{settings.KeyPlayPause} / {settings.KeyNext} / {settings.KeyPrevious}");
+        }
+        var ctl = new PlayerController(settings);
+        var win = new MainWindow(ctl)
+        {
+            WindowStartupLocation = WindowStartupLocation.Manual,
+            Left = 40, Top = 40, Width = 1180, Height = 760, ShowInTaskbar = true,
+        };
+        win.Show();
+        win.Activate();
+        PumpFrames(400);
+        RunBlocking(app, ctl.ShowLibraryAsync());
+        PumpFrames(400);
+        var folder = Arg(args, "--folder");
+        lines.Add($"before: enabled={settings.Enabled} above={settings.OverlayAboveApps} " +
+                  $"playing={ctl.PlaybackState} songs={ctl.Songs.Count} focused={win.IsActive}");
+        lines.Add("hotkeys " + win.DebugHotkeys);
+
+        void SendChord(string text, string label)
+        {
+            if (!HotkeyText.TryParse(text, out var chord) || chord.IsEmpty)
+            {
+                lines.Add($"{label}: '{text}' 解析失败");
+                return;
+            }
+            var mods = new List<byte>();
+            if ((chord.Modifiers & NativeMethods.MOD_CONTROL) != 0) mods.Add(0x11);
+            if ((chord.Modifiers & NativeMethods.MOD_ALT) != 0) mods.Add(0x12);
+            if ((chord.Modifiers & NativeMethods.MOD_SHIFT) != 0) mods.Add(0x10);
+            if ((chord.Modifiers & NativeMethods.MOD_WIN) != 0) mods.Add(0x5B);
+            foreach (var m in mods) { NativeMethods.keybd_event(m, 0, 0, UIntPtr.Zero); PumpFrames(40); }
+            NativeMethods.keybd_event((byte)chord.VirtualKey, 0, 0, UIntPtr.Zero);
+            PumpFrames(60);
+            NativeMethods.keybd_event((byte)chord.VirtualKey, 0, NativeMethods.KEYEVENTF_KEYUP, UIntPtr.Zero);
+            PumpFrames(40);
+            for (int i = mods.Count - 1; i >= 0; i--)
+                NativeMethods.keybd_event(mods[i], 0, NativeMethods.KEYEVENTF_KEYUP, UIntPtr.Zero);
+            PumpFrames(260);
+            lines.Add($"after {label} ({text}): enabled={settings.Enabled} above={settings.OverlayAboveApps} " +
+                      $"playing={ctl.PlaybackState} cur='{ctl.Current?.Title}' focused={win.IsActive} " +
+                      $"log=[{win.DebugHotkeys}]");
+        }
+
+        SendChord(settings.KeyLyrics, "F8/桌面歌词");
+            SendChord(settings.KeyAboveApps, "Ctrl+Q/置顶");
+            SendChord(settings.KeyPlayPause, "P/播放暂停");
+            SendChord(settings.KeyNext, "下一首");
+            SendChord(settings.KeyPrevious, "上一首");
+
+        // Deterministic half: post the exact message Windows posts for a registered hotkey. This cannot
+            // be blocked by focus/UIPI, so it proves the hook → action chain (and that each chord fires ONCE).
+        lines.Add("--- WM_HOTKEY 直达窗口 ---");
+        foreach (HotkeyAction action in Enum.GetValues<HotkeyAction>())
+        {
+            int before = settings.Enabled ? 1 : 0;
+            NativeMethods.PostMessage(win.DebugHotkeyHandle, NativeMethods.WM_HOTKEY,
+                new IntPtr(100 + (int)action), IntPtr.Zero);
+            PumpFrames(300);
+            lines.Add($"post {action}: enabled={settings.Enabled} above={settings.OverlayAboveApps} " +
+                      $"playing={ctl.PlaybackState} cur='{ctl.Current?.Title}' " +
+                      $"log=[{win.DebugHotkeys}]");
+        }
+        File.WriteAllLines(Path.Combine(dir, "keyqa.txt"), lines);
+        win.Close();
+        app.Shutdown();
+    }
+
+        /// <summary>QA for 快捷键: parse/format round-trip, real RegisterHotKey, the WM_HOTKEY path, and
+        /// (with --folder) the 上一首 behaviour on the first row of a queue.</summary>
+    private static void RunHotkeyQa(Application app, string[] args, AppSettings settings)
+    {
+        string dir = Arg(args, "--hotkey-qa") ?? "hotkeys";
+        Directory.CreateDirectory(dir);
+        var lines = new List<string>();
+
+        // ---- 1. parsing / formatting -------------------------------------------------
+        foreach (var text in new[]
+                 {
+                     "Ctrl+Q", "ctrl + q", "F8", "P", "F6", "F7", "Ctrl+Shift+Q", "Ctrl+", "", "Foo",
+                     "Shift+F1", "Alt+Space", "Num5", "Ctrl+P", "F12", "F13",
+                 })
+        {
+            bool ok = HotkeyText.TryParse(text, out var chord);
+            string extra = "";
+            if (ok)
+            {
+                bool allowed = HotkeyText.IsAllowed(chord, out string why);
+                extra = $"vk={chord.VirtualKey} mods={chord.Modifiers} text='{HotkeyText.Format(chord)}' " +
+                        $"allowed={allowed}" + (allowed ? "" : " reason=" + why);
+            }
+            lines.Add($"parse '{text}' -> {(ok ? "ok" : "reject")} {extra}");
+        }
+
+        // ---- 1b. the 1.2.60 rule: modifier required, two keys max, F1~F12 stand alone ----
+        foreach (var (text, want) in new[]
+                 {
+                     ("Ctrl+Q", true), ("Ctrl+P", true), ("F8", true), ("F12", true), ("F13", false),
+                     ("P", false), ("A", false), ("Ctrl+Shift+P", false), ("Shift+F5", true),
+                 })
+        {
+            bool ok = HotkeyText.TryParse(text, out var chord) && HotkeyText.IsAllowed(chord, out _);
+            lines.Add($"rule '{text}' allowed={ok} (want {want}) {(ok == want ? "OK" : "MISMATCH")}");
+        }
+        lines.Add($"default play/pause = '{AppSettings.DefaultKeyPlayPause}' " +
+                  $"migrate legacy 'P' -> '{HotkeyText.NormalizeOrDefault("P", AppSettings.DefaultKeyPlayPause)}'");
+
+        // ---- 2. real registration + message path -------------------------------------
+        var window = new Window
+        {
+            Width = 1, Height = 1, WindowStyle = WindowStyle.None, ShowInTaskbar = false,
+            AllowsTransparency = true, Opacity = 0, ShowActivated = false,
+        };
+        window.Show();
+        app.Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
+        var manager = new HotkeyManager();
+        manager.Attach(window);
+        var fired = new List<HotkeyAction>();
+        manager.Pressed += a => fired.Add(a);
+        manager.Apply(new Dictionary<HotkeyAction, string>
+        {
+            [HotkeyAction.AboveApps] = settings.KeyAboveApps,
+            [HotkeyAction.ToggleLyrics] = settings.KeyLyrics,
+            [HotkeyAction.PlayPause] = settings.KeyPlayPause,
+            [HotkeyAction.Next] = settings.KeyNext,
+            [HotkeyAction.Previous] = settings.KeyPrevious,
+        });
+        lines.Add($"registered: failed=[{string.Join(",", manager.Failed)}] " +
+                  $"codes=[{string.Join(",", manager.FailCodes.Select(kv => $"{kv.Key}={kv.Value}"))}] " +
+                  $"count={manager.RegisteredCount}");
+
+        IntPtr hwnd = new System.Windows.Interop.WindowInteropHelper(window).Handle;
+        foreach (HotkeyAction action in Enum.GetValues<HotkeyAction>())
+        {
+            int id = 100 + (int)action;
+            int before = fired.Count;
+            NativeMethods.PostMessage(hwnd, NativeMethods.WM_HOTKEY, new IntPtr(id), IntPtr.Zero);
+            app.Dispatcher.Invoke(() => { }, DispatcherPriority.Input);
+            lines.Add($"WM_HOTKEY id={id} ({action}) -> fired={(fired.Count > before ? fired[^1].ToString() : "none")}");
+        }
+            // 裸字母不再是合法绑定（1.2.60 规则），这里确认它确实被规则挡在注册之前。
+        bool bareAllowed = HotkeyText.TryParse("P", out var bare) && HotkeyText.IsAllowed(bare, out _);
+        lines.Add($"bare 'P' allowed={bareAllowed} (want False) -> no silent window-local binding any more");
+        manager.Dispose();
+        window.Close();
+        app.Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
+
+            // ---- 3. 上一首 on the first row ----------------------------------------------
+        lines.Add($"rule index=0 pos=5000 -> restart={PlayerController.ShouldRestartOnPrevious(0, 5000)} " +
+                  $"(false = steps to the last track)");
+        lines.Add($"rule index=1 pos=5000 -> restart={PlayerController.ShouldRestartOnPrevious(1, 5000)}");
+        lines.Add($"rule index=1 pos=1000 -> restart={PlayerController.ShouldRestartOnPrevious(1, 1000)}");
+        var folder = Arg(args, "--folder");
+        if (!string.IsNullOrEmpty(folder) && Directory.Exists(folder))
+        {
+            var controller = new PlayerController(settings);
+            controller.ShowLocalAsync(folder).GetAwaiter().GetResult();
+            app.Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
+            lines.Add($"folder songs={controller.Songs.Count}");
+            if (controller.Songs.Count >= 2)
+            {
+                controller.PlayAsync(controller.Songs[0]).GetAwaiter().GetResult();
+                for (int i = 0; i < 20; i++) Pump(app, 50);
+                controller.Seek(6000);
+                for (int i = 0; i < 6; i++) Pump(app, 50);
+                lines.Add($"before: index=0 current='{controller.Current?.Title}' pos={controller.PositionMs:0}");
+                controller.Previous();
+                for (int i = 0; i < 10; i++) Pump(app, 50);
+                lines.Add($"after Previous: current='{controller.Current?.Title}' pos={controller.PositionMs:0} " +
+                          $"expected='{controller.Songs[^1].Title}'");
+            }
+            controller.Dispose();
+        }
+        File.WriteAllLines(Path.Combine(dir, "hotkeys.txt"), lines);
+        app.Shutdown();
+    }
+
+    /// <summary>
+        /// QA for the 1.2.60 「改不了快捷键」bug. With a Chinese IME switched on WPF reports a letter as
+    /// <c>Key.ImeProcessed</c> and puts the real key only in <c>ImeProcessedKey</c>; the old settings page
+        /// read <c>e.Key</c>, saw the pseudo-key, and refused every letter — so nothing could be rebound.
+    /// This drives the REAL HotkeyWindow with synthetic events of both kinds, then checks that a custom
+    /// binding survives a Save/Load round trip (it used to be reset to the defaults by Normalized()).
+    /// </summary>
+    private static void RunHotkeyCaptureQa(Application app, string[] args, AppSettings settings)
+    {
+        string dir = Arg(args, "--hotkey-capture-qa") ?? "hotkey-capture";
+        Directory.CreateDirectory(dir);
+        var lines = new List<string>();
+        string saved = settings.KeyPlayPause;
+
+        var win = new HotkeyWindow(settings, () => new List<HotkeyAction>())
+        {
+            WindowStartupLocation = WindowStartupLocation.Manual,
+            Left = 60,
+            Top = 60,
+        };
+        win.Show();
+        app.Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
+        Pump(app, 250);
+        var source = PresentationSource.FromVisual(win);
+
+        System.Windows.Input.KeyEventArgs MakeKey(System.Windows.Input.Key key)
+        {
+            return new System.Windows.Input.KeyEventArgs(
+                System.Windows.Input.Keyboard.PrimaryDevice, source, 0, key)
+            {
+                RoutedEvent = System.Windows.Input.Keyboard.PreviewKeyDownEvent,
+            };
+        }
+
+        // 0) 输入法那一半：WPF 在中文输入法下把字母报成 Key.ImeProcessed，真键在 ImeProcessedKey。
+        //    合成 KeyEventArgs 无法写这两个只读属性，所以这里直接验证纯函数 + 解析后的规则。
+        lines.Add($"resolve ime Key.P -> {HotkeyText.ResolveKey(System.Windows.Input.Key.ImeProcessed, System.Windows.Input.Key.None, System.Windows.Input.Key.P)}");
+        lines.Add($"resolve system Key.Q -> {HotkeyText.ResolveKey(System.Windows.Input.Key.System, System.Windows.Input.Key.Q, System.Windows.Input.Key.None)}");
+        lines.Add($"resolve plain F8 -> {HotkeyText.ResolveKey(System.Windows.Input.Key.F8, System.Windows.Input.Key.None, System.Windows.Input.Key.None)}");
+        bool okCtrlP = HotkeyText.TryCapture(System.Windows.Input.Key.P,
+            System.Windows.Input.ModifierKeys.Control, out var ctrlP, out string whyCtrlP);
+        lines.Add($"capture resolved P + Ctrl -> {okCtrlP} '{HotkeyText.Format(ctrlP)}' reason='{whyCtrlP}'");
+        bool okBareP = HotkeyText.TryCapture(System.Windows.Input.Key.P,
+            System.Windows.Input.ModifierKeys.None, out _, out string whyBareP);
+        lines.Add($"capture resolved P alone -> {okBareP} reason='{whyBareP}'");
+
+            // 1) 裸字母：必须被"规则"挡下（不是"识别不了"），而且页面要继续等着，不能收起捕获。
+        win.DebugBeginCapture(HotkeyAction.PlayPause);
+        win.RaiseEvent(MakeKey(System.Windows.Input.Key.P));
+        Pump(app, 150);
+        lines.Add($"window bare P -> value='{settings.KeyPlayPause}' " +
+                  $"recording={win.DebugIsRecording} status='{win.DebugStatus}'");
+
+        // 2) F5 单开合法（F1~F12 例外），必须真的写进去 —— 这就是旧版在中文输入法下做不到的路径。
+        win.DebugBeginCapture(HotkeyAction.PlayPause);
+        win.RaiseEvent(MakeKey(System.Windows.Input.Key.F5));
+        Pump(app, 150);
+        lines.Add($"window F5 -> value='{settings.KeyPlayPause}' recording={win.DebugIsRecording} " +
+                  $"status='{win.DebugStatus}' label='{win.DebugLabel(HotkeyAction.PlayPause)}'");
+
+            // 3) 只按修饰键：要提示"再按一个具体的按键"，并且继续录。
+        win.DebugBeginCapture(HotkeyAction.Next);
+        win.RaiseEvent(MakeKey(System.Windows.Input.Key.LeftCtrl));
+        Pump(app, 150);
+        lines.Add($"window modifier-only -> value='{settings.KeyNext}' recording={win.DebugIsRecording} " +
+                  $"status='{win.DebugStatus}'");
+
+            // 4) Esc 取消，什么都不改。
+        win.DebugBeginCapture(HotkeyAction.Previous);
+        win.RaiseEvent(MakeKey(System.Windows.Input.Key.Escape));
+        Pump(app, 150);
+        lines.Add($"window escape -> recording={win.DebugIsRecording} value='{settings.KeyPrevious}'");
+
+        Save(win, Path.Combine(dir, "hotkey-capture.png"));
+        win.Close();
+        app.Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
+
+        // ---- 5. persistence: a custom chord has to survive Normalized() on Save AND Load ----
+        settings.KeyPlayPause = "Ctrl+F9";
+        SettingsStore.Save(settings);
+        var reloaded = SettingsStore.Load();
+        lines.Add($"persist 'Ctrl+F9' -> reloaded '{reloaded.KeyPlayPause}' " +
+                  $"{(reloaded.KeyPlayPause == "Ctrl+F9" ? "OK" : "LOST")}");
+
+        settings.KeyPlayPause = "P";                       // legacy (window-local) value on disk
+        SettingsStore.Save(settings);
+        var migrated = SettingsStore.Load();
+        lines.Add($"migrate stored 'P' -> loaded '{migrated.KeyPlayPause}' " +
+                  $"{(migrated.KeyPlayPause == AppSettings.DefaultKeyPlayPause ? "OK" : "MISMATCH")}");
+
+        settings.KeyPlayPause = saved;
+        SettingsStore.Save(settings);
+
+        File.WriteAllLines(Path.Combine(dir, "hotkey-capture.txt"), lines);
+        app.Shutdown();
+    }
+
+    /// <summary>QA: what `song/lyric` really returns for a cloud id (line level vs word level), and
+    /// whether our converter turns it into per-cluster timing the renderer can follow. Prints one line
+        /// per response key plus the parsed result, so "匀速" can be traced to its actual cause.</summary>
+    private static void RunLyricProbe(string[] args)
+    {
+        string outFile = Arg(args, "--lyric-probe") ?? "lyric-probe.txt";
+        var folder = Arg(args, "--folder");
+        if (!string.IsNullOrEmpty(folder) && Directory.Exists(folder))
+        {
+            RunLyricFolderProbe(folder, outFile);
+            return;
+        }
+        var ids = (Arg(args, "--ids") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries);
+        var lines = new List<string>();
+        foreach (var raw in ids)
+        {
+            if (!long.TryParse(raw.Trim(), out long id)) continue;
+            JsonObject? root;
+            try { root = NeteaseApi.LyricRootAsync(id).GetAwaiter().GetResult(); }
+            catch (Exception ex) { lines.Add($"id={id} ERR {ex.GetType().Name}: {ex.Message}"); continue; }
+            if (root == null) { lines.Add($"id={id} root=null"); continue; }
+            foreach (var key in new[] { "lrc", "yrc", "klyric", "tlyric" })
+            {
+                var text = (root[key] as JsonObject)?["lyric"]?.GetValue<string>() ?? "";
+                var sample = text.Split('\n').FirstOrDefault(s => s.Trim().Length > 0) ?? "";
+                lines.Add($"id={id} [{key}] len={text.Length} sample={(sample.Length > 110 ? sample[..110] : sample)}");
+            }
+            string best;
+            try { best = NeteaseApi.LyricAsync(id).GetAwaiter().GetResult() ?? ""; }
+            catch (Exception ex) { lines.Add($"id={id} convert ERR {ex.GetType().Name}: {ex.Message}"); continue; }
+            var doc = LrcParser.Parse(best);
+            int real = doc.Lines.Count(l => l.Words.Count > 0 && !l.WordsEstimated);
+            var first = doc.Lines.FirstOrDefault(l => l.Words.Count > 0);
+            lines.Add($"id={id} parsed lines={doc.Lines.Count} realWordTimingLines={real} " +
+                      $"firstWords={first?.Words.Count ?? 0} estimated={first?.WordsEstimated}");
+            if (first != null && first.Words.Count > 0)
+                lines.Add($"id={id} words: " +
+                          string.Join(" ", first.Words.Take(8).Select(w => $"{w.Text}@{w.StartMs}-{w.EndMs}")));
+                // A sung line, not the metadata header: uneven durations here are what "跟着语速" means.
+            var sung = doc.Lines.FirstOrDefault(l => l.Words.Count >= 6 && !l.WordsEstimated);
+            if (sung != null)
+            {
+                var durations = sung.Words.Select(w => w.EndMs - w.StartMs).ToList();
+                lines.Add($"id={id} sungLine='{(sung.Text.Length > 20 ? sung.Text[..20] : sung.Text)}' " +
+                          $"words={sung.Words.Count} dur_min={durations.Min()} dur_max={durations.Max()} " +
+                          $"dur_avg={durations.Average():0} estimated={sung.WordsEstimated}");
+                lines.Add($"id={id} sungWords: " +
+                          string.Join(" ", sung.Words.Take(10).Select(w => $"{w.Text}@{w.StartMs}+{w.EndMs - w.StartMs}")));
+            }
+        }
+        File.WriteAllLines(outFile, lines);
+    }
+
+        /// <summary>QA: why a local file does or does not get word-level lyrics — walks the exact decisions
+        /// LoadLyricsAsync makes (sidecar → has word timing? → id from the file name → online fetch).</summary>
+    private static void RunLyricFolderProbe(string folder, string outFile)
+    {
+        var lines = new List<string>();
+        foreach (var path in Directory.GetFiles(folder).Where(f =>
+                     !f.EndsWith(".lrc", StringComparison.OrdinalIgnoreCase) &&
+                     !f.EndsWith(".txt", StringComparison.OrdinalIgnoreCase)))
+        {
+            var local = LrcParser.LoadFor(path);
+            long id = PlayerController.GuessNeteaseIdFromPath(path);
+            lines.Add($"file='{Path.GetFileName(path)}' guessedId={id} localLines={local?.Lines.Count ?? -1} " +
+                      $"localWordTiming={LrcParser.HasWordTiming(local)}");
+            if (id <= 0 || LrcParser.HasWordTiming(local)) continue;
+            string? text = null;
+            try { text = NeteaseApi.LyricAsync(id).GetAwaiter().GetResult(); }
+            catch (Exception ex) { lines.Add($"  fetch ERR {ex.GetType().Name}: {ex.Message}"); continue; }
+            var online = text == null ? null : LrcParser.Parse(text);
+            lines.Add($"  fetch len={text?.Length ?? -1} lines={online?.Lines.Count ?? -1} " +
+                      $"wordTiming={LrcParser.HasWordTiming(online)} sameSong={PlayerController.SameSong(local, online)} " +
+                      $"firstSample={(text ?? "").Split('\n').FirstOrDefault() ?? ""}".Trim());
+        }
+        File.WriteAllLines(outFile, lines);
+    }
+
     private static void RunLiveShot(Application app, string[] args, AppSettings settings)
     {
         string path = Arg(args, "--liveshot") ?? "live.png";
@@ -4767,3 +5523,4 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
         return song;
     }
 }
+

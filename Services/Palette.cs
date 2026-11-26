@@ -30,19 +30,35 @@ public static class Palette
     /// <summary>Sentinel stored in <c>ThemeImage</c> for "use the playing track's cover".</summary>
     public const string CoverToken = "@cover";
 
+    /// <summary>
+    /// Six hex digits = an opaque colour. Eight = AARRGGBB, where the alpha is how much of that colour
+    /// the panels paint over the cover image: "00RRGGBB" is the 背景色 = 透明 option (the picture shows
+    /// through the side bar and the cards).
+    /// </summary>
     public static string Normalize(string hex, string fallback)
     {
         var text = (hex ?? "").Trim().TrimStart('#');
-        if (text.Length != 6) return fallback;
+        if (text.Length != 6 && text.Length != 8) return fallback;
         foreach (var c in text)
             if (!Uri.IsHexDigit(c)) return fallback;
         return text.ToUpperInvariant();
     }
 
-    public static Color Parse(string hex) => Color.FromRgb(
-        Convert.ToByte(hex[..2], 16),
-        Convert.ToByte(hex.Substring(2, 2), 16),
-        Convert.ToByte(hex.Substring(4, 2), 16));
+    public static Color Parse(string hex) => hex.Length == 8
+        ? Color.FromArgb(
+            Convert.ToByte(hex[..2], 16),
+            Convert.ToByte(hex.Substring(2, 2), 16),
+            Convert.ToByte(hex.Substring(4, 2), 16),
+            Convert.ToByte(hex.Substring(6, 2), 16))
+        : Color.FromRgb(
+            Convert.ToByte(hex[..2], 16),
+            Convert.ToByte(hex.Substring(2, 2), 16),
+            Convert.ToByte(hex.Substring(4, 2), 16));
+
+    /// <summary>Alpha of a surface colour, 255 when it is a plain six-digit colour.</summary>
+    public static byte SurfaceAlpha(string hex) => hex.Length == 8
+        ? Convert.ToByte(hex[..2], 16)
+        : (byte)0xFF;
 
     public static string Hex(Color color) => $"{color.R:X2}{color.G:X2}{color.B:X2}";
 
@@ -57,6 +73,7 @@ public static class Palette
         if (resources == null) return;
 
         var seed = Parse(Normalize(surfaceHex, DefaultSurface));
+        byte surfaceAlpha = SurfaceAlpha(Normalize(surfaceHex, DefaultSurface));
         RgbToHsl(seed, out var hue, out var sat, out var seedLum);
         // A pick from the corner of the square is "black", not "black green": only colours with no
         // measurable channel at all are forced neutral, so a dark red keeps its red.
@@ -81,19 +98,20 @@ public static class Palette
 
         float sign = lightFace ? -1f : 1f;      // deeper shading goes away from the face colour
 
-        var card = seed;
+        // RGB only: the alpha belongs to the panels (plate), never to the ink blended out of it.
+        var card = Color.FromRgb(seed.R, seed.G, seed.B);
         // Flat surface: the side bar, header band, list and player bar are all the picked colour
         // itself. Depth comes from hairlines and the small steps below, never from a second base
         // colour — otherwise those blocks read as a different tint from the rest.
-        var window = seed;
+        var window = card;
         var panel = Step(-sign * 0.022f);
         var raised = Step(-sign * 0.034f);
         var inset = Step(sign * 0.048f);
         var hairline = Step(sign * 0.090f);
         var hairlineSoft = Step(sign * 0.052f);
         var hover = Step(sign * 0.042f);
-        var cardEdge = seed;
-        var washCore = seed;
+        var cardEdge = card;
+        var washCore = card;
 
         // Selection is a stronger step of the same colour rather than a foreign accent tint, so the
         // ink colour that was chosen for this panel stays readable on top of it.
@@ -108,7 +126,9 @@ public static class Palette
         var faint = Blend(ink, card, 0.48);
 
         // With a photo behind the window the cards go translucent so the picture actually reads.
-        byte plate = glassy ? (byte)0xDA : (byte)0xFF;
+        // An explicit alpha in the 背景色 (the 透明 option: "00RRGGBB") wins and is used verbatim: 00 means
+        // the window really is see-through, with no tint of our own on top.
+        byte plate = surfaceAlpha < 0xFF ? surfaceAlpha : glassy ? (byte)0xDA : (byte)0xFF;
 
         Set(resources, "WindowBrush", Solid(window));
         Set(resources, "SidebarBrush", Solid(WithAlpha(window, plate)));
@@ -116,14 +136,19 @@ public static class Palette
         Set(resources, "SurfaceBrush", Solid(WithAlpha(card, plate)));
         Set(resources, "SurfaceRaisedBrush", Solid(WithAlpha(panel, plate)));
         Set(resources, "InsetBrush", Solid(WithAlpha(inset, plate)));
-        Set(resources, "HairlineBrush", Solid(hairline));
-        Set(resources, "HairlineSoftBrush", Solid(hairlineSoft));
-        Set(resources, "NavActiveBrush", Solid(selected));
+        // No hairlines anywhere (user request, 1.2.66): the app is meant to read as floating text and
+        // artwork, with or without a background colour. Structure comes from spacing, not from rules.
+        Set(resources, "HairlineBrush", Solid(Colors.Transparent));
+        Set(resources, "HairlineSoftBrush", Solid(Colors.Transparent));
+        // Selection follows the panels too: at plate=0 there is no fill at all, and the row keeps its
+        // SemiBold weight (nav buttons get the accent foreground in code) so "which one is selected" is
+        // still readable.
+        Set(resources, "NavActiveBrush", Solid(WithAlpha(selected, plate)));
         Set(resources, "RowHoverBrush", Solid(WithAlpha(hover, plate)));
-        Set(resources, "RowSelectedBrush", Solid(selected));
+        Set(resources, "RowSelectedBrush", Solid(WithAlpha(selected, plate)));
         Set(resources, "AccentBrush", Solid(accent));
         Set(resources, "AccentHiBrush", Solid(accentHi));
-        Set(resources, "AccentSoftBrush", Solid(accentSoft));
+        Set(resources, "AccentSoftBrush", Solid(WithAlpha(accentSoft, plate)));
         Set(resources, "AccentColor", accent);
         Set(resources, "TextBrush", Solid(text));
         Set(resources, "TextDimBrush", Solid(dim));

@@ -889,9 +889,22 @@ public sealed class PlayerController : IDisposable
     private async Task LoadLyricsAsync(Song song)
     {
         await Task.Yield();
-        LyricDocument? doc = song.Source == SongSource.Netease && !File.Exists(song.Path)
-            ? await LoadOnlineLyricsAsync(song)
-            : LrcParser.LoadFor(song.Path);
+        // Local text first: a sidecar (or embedded tag) is the user's own file and may be hand-edited.
+        LyricDocument? local = File.Exists(song.Path) ? LrcParser.LoadFor(song.Path) : null;
+        LyricDocument? doc = local;
+        // Cloud rows always go online. Files that were DOWNLOADED from the cloud are plain local rows
+        // with no id, so the id is recovered from the file name this app writes ("… [123456789].mp3") —
+        // otherwise an old download keeps its line-only sidecar and the karaoke stays an even spread.
+        long cloudId = song.NeteaseId > 0 ? song.NeteaseId : GuessNeteaseIdFromPath(song.Path);
+        if (cloudId > 0 && !LrcParser.HasWordTiming(local))
+        {
+            var online = await LoadOnlineLyricsAsync(cloudId).ConfigureAwait(false);
+            // The id may have been guessed from the file name, so never let a wrong guess replace real
+            // lyrics with another song's text: only take the online document when the visible text
+            // agrees, or when there is no local text to lose.
+            if (online != null && (local == null || LrcParser.HasWordTiming(online) && SameSong(local, online)))
+                doc = online;
+        }
         if (doc != null)
             doc = LrcParser.WithOpeningCard(doc, song.DisplayTitle, song.DisplayArtist, song.Album);
         if (!ReferenceEquals(Current, song)) return;
@@ -899,27 +912,81 @@ public sealed class PlayerController : IDisposable
         LyricsChanged?.Invoke();
     }
 
-    /// <summary>Fetches a cloud track's LRC once, then keeps it next to the app's data so replays and
-    /// downloads reuse the same text instead of asking the network again.</summary>
-    private async Task<LyricDocument?> LoadOnlineLyricsAsync(Song song)
+    /// <summary>NeteaseDownload names saved tracks `"title - artist [id].ext"`; recover that id so a
+    /// downloaded track can still ask for the word-level lyric it was downloaded without.</summary>
+    /// <summary>Cheap identity check between a local sidecar and a fetched document.</summary>
+    internal static bool SameSong(LyricDocument? local, LyricDocument? online)
     {
-        var file = Path.Combine(AppPaths.DataDir, "lyrics", song.NeteaseId + ".lrc");
+        var a = FirstSungText(local);
+        var b = FirstSungText(online);
+        if (a.Length == 0 || b.Length == 0) return true;
+        int n = Math.Min(12, Math.Min(a.Length, b.Length));
+        return string.CompareOrdinal(a, 0, b, 0, n) == 0;
+    }
+
+    private static string FirstSungText(LyricDocument? doc)
+    {
+        if (doc == null) return "";
+        foreach (var line in doc.Lines)
+        {
+            var text = new string(line.Text.Where(c => !char.IsWhiteSpace(c) && !char.IsPunctuation(c) && !char.IsSymbol(c)).ToArray());
+            if (text.Length >= 4) return text;
+        }
+        return "";
+    }
+
+    internal static long GuessNeteaseIdFromPath(string path)
+    {
+        if (string.IsNullOrEmpty(path)) return 0;
+        var stem = System.IO.Path.GetFileNameWithoutExtension(path);
+        int open = stem.LastIndexOf('[');
+        if (open < 0 || open >= stem.Length - 2 || stem[^1] != ']') return 0;
+        var digits = stem[(open + 1)..^1];
+        if (digits.Length < 5 || !digits.All(char.IsAsciiDigit)) return 0;
+        return long.TryParse(digits, out var id) ? id : 0;
+    }
+
+    /// <summary>Fetches a cloud track's lyrics once, then keeps them next to the app's data so replays
+    /// and downloads reuse the same text instead of asking the network again. `<id>.v2` marks a cache
+    /// written by the word-level-aware request; caches without it are re-fetched once, so songs
+    /// downloaded before that change stop sweeping at a constant rate.</summary>
+    private async Task<LyricDocument?> LoadOnlineLyricsAsync(long cloudId)
+    {
+        var file = Path.Combine(AppPaths.DataDir, "lyrics", cloudId + ".lrc");
+        var marker = Path.Combine(AppPaths.DataDir, "lyrics", cloudId + ".v2");
+        bool upgraded = File.Exists(marker);
         try
         {
             if (File.Exists(file))
             {
                 var cached = LrcParser.Parse(File.ReadAllText(file));
-                if (cached.Lines.Count > 0) return cached;
+                if (cached.Lines.Count > 0 && (upgraded || LrcParser.HasWordTiming(cached))) return cached;
             }
         }
         catch { }
 
-        var text = await Task.Run(() => NeteaseApi.LyricAsync(song.NeteaseId));
-        if (string.IsNullOrWhiteSpace(text)) return null;
+        string? text = null;
+        try { text = await Task.Run(() => NeteaseApi.LyricAsync(cloudId)).ConfigureAwait(false); }
+        catch { }
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            // Keep whatever cache we already had instead of losing the lyrics to a network hiccup.
+            try
+            {
+                if (File.Exists(file))
+                {
+                    var cached = LrcParser.Parse(File.ReadAllText(file));
+                    if (cached.Lines.Count > 0) return cached;
+                }
+            }
+            catch { }
+            return null;
+        }
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(file)!);
             File.WriteAllText(file, text);
+            File.WriteAllText(marker, "word-level request v2");
         }
         catch { }
         return LrcParser.Parse(text);
@@ -1003,9 +1070,16 @@ public sealed class PlayerController : IDisposable
 
     public void Previous()
     {
-        if (Playback.PositionMs > 4000) { Playback.Seek(0); return; }
+        if (Songs.Count == 0) return;
+        int index = Current == null ? -1 : Songs.IndexOf(Current);
+        if (ShouldRestartOnPrevious(index, Playback.PositionMs)) { Playback.Seek(0); return; }
         Step(-1);
     }
+
+    /// <summary>The 4-second rule restarts the current track instead of stepping back — but never on
+    /// the FIRST row: there is no earlier position to rewind to, and restarting the same track is what
+    /// made 上一首 look dead at the top of the list (user report). Below the first row it still applies.</summary>
+    internal static bool ShouldRestartOnPrevious(int index, double positionMs) => index > 0 && positionMs > 4000;
 
     private void Step(int direction)
     {

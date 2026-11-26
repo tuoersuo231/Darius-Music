@@ -157,19 +157,28 @@ public static class NeteaseDownload
     private static async Task<string?> TryGetLyricsAsync(Song song, CancellationToken token)
     {
         var cached = Path.Combine(AppPaths.DataDir, "lyrics", song.NeteaseId + ".lrc");
+        var marker = Path.Combine(AppPaths.DataDir, "lyrics", song.NeteaseId + ".v2");
         try
         {
-            if (File.Exists(cached)) return File.ReadAllText(cached);
+            if (File.Exists(cached))
+            {
+                var text = File.ReadAllText(cached);
+                // A cache written before the word-level request carries line stamps only; writing that
+                // into the download's sidecar would make the saved copy sweep at a constant rate.
+                var doc = LrcParser.Parse(text);
+                if (doc.Lines.Count > 0 && (File.Exists(marker) || LrcParser.HasWordTiming(doc))) return text;
+            }
         }
         catch { }
-        var text = await Task.Run(() => NeteaseApi.LyricAsync(song.NeteaseId, token), token);
-        if (string.IsNullOrWhiteSpace(text)) return null;
+        var text2 = await Task.Run(() => NeteaseApi.LyricAsync(song.NeteaseId, token), token);
+        if (string.IsNullOrWhiteSpace(text2)) return null;
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(cached)!);
-            File.WriteAllText(cached, text);
+            File.WriteAllText(cached, text2);
+            File.WriteAllText(marker, "word-level request v2");
         }
         catch { }
-        return text;
+        return text2;
     }
 }

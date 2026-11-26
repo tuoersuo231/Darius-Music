@@ -106,7 +106,10 @@ public static partial class LrcParser
             }
         }
 
-        lines.Sort((a, b) => a.StartMs.CompareTo(b.StartMs));
+        // OrderBy is a *stable* sort: List.Sort is not, so two cues that share a timestamp (a lyric
+        // and its translation) could come out swapped — which showed the Chinese translation as the
+        // sung line and hid the Japanese original.
+        lines = lines.OrderBy(l => l.StartMs).ToList();
         lines = MergeBilingual(lines);
         for (int i = 0; i < lines.Count; i++)
         {
@@ -205,6 +208,15 @@ public static partial class LrcParser
                 // The karaoke-timed line is the sung one; the untimed twin is its translation.
                 if (line.Words.Count > 0 && previous.Words.Count == 0)
                 {
+                    line.Translation = previous.Text;
+                    line.StartMs = previous.StartMs;
+                    result[result.Count - 1] = line;
+                }
+                else if (line.Words.Count == 0 && previous.Words.Count == 0
+                         && line.Text.Any(IsKana) && !previous.Text.Any(IsKana))
+                {
+                    // Neither side is karaoke-timed, so only the script tells us which one is sung:
+                    // the kana line is the original, the han-only line under it is the translation.
                     line.Translation = previous.Text;
                     line.StartMs = previous.StartMs;
                     result[result.Count - 1] = line;
@@ -379,6 +391,18 @@ public static partial class LrcParser
             }
         }
         return null;
+    }
+
+    /// <summary>True when at least one line carries REAL per-cluster timing (not the even spread
+    /// SynthesizeWords makes up). Online tracks used to fall back to the synthesised spread because the
+    /// lyric request never asked for the word-level form, which made the karaoke sweep run at a
+    /// constant rate instead of following the vocal.</summary>
+    public static bool HasWordTiming(LyricDocument? doc)
+    {
+        if (doc == null) return false;
+        foreach (var line in doc.Lines)
+            if (line.Words.Count > 0 && !line.WordsEstimated) return true;
+        return false;
     }
 
     public static LyricDocument? LoadFor(string audioPath)

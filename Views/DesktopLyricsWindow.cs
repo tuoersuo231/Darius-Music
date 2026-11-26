@@ -62,7 +62,7 @@ public sealed class DesktopLyricsWindow : Window
         Background = Brushes.Transparent;
         ShowInTaskbar = false;
         ShowActivated = false;
-        Topmost = settings.Topmost || settings.OverlayAboveApps;
+        Topmost = settings.OverlayAboveApps && settings.BackdropMode == BackdropMode.Transparent;
         ResizeMode = ResizeMode.NoResize;
         WindowStartupLocation = WindowStartupLocation.Manual;
         Title = "Darius Music";
@@ -177,6 +177,14 @@ public sealed class DesktopLyricsWindow : Window
             ApplyWindowStyles();
             ApplyOverlayTopmost();
             if (PresentationSource.FromVisual(this) is HwndSource source) source.AddHook(WndProc);
+        };
+        // Show() after a Hide() drops the window at the bottom of the topmost band, and nothing tells the
+        // foreground hook about it (the foreground did not change). Re-assert on every appearance.
+        IsVisibleChanged += (_, _) =>
+        {
+            if (!IsVisible) return;
+            ApplyOverlayTopmost();
+            if (_settings.OverlayAboveApps) QueueRaise();
         };
         // 背景宽高 changes the window size, and ActualWidth still reports the *old* size while
         // ApplySettings runs, so the backdrop has to be rebuilt once the new layout is in place.
@@ -300,6 +308,56 @@ public sealed class DesktopLyricsWindow : Window
         catch (Exception ex) { LogState("drag-save-failed " + ex.GetType().Name + ": " + ex.Message); }
     }
 
+    // ---------- hotkey confirmation ----------
+    private Border? _toast;
+    private System.Windows.Threading.DispatcherTimer? _toastTimer;
+
+    /// <summary>
+    /// A one-line confirmation at the top of the overlay, for hotkeys whose result is otherwise
+    /// invisible (显示在其他应用上方 / 没有歌可放). 1.5 s, hit-test off, never touches the lyric column.
+    /// </summary>
+    public void ShowToast(string text)
+    {
+        if (_root == null) return;
+        if (_toast == null)
+        {
+            var label = new TextBlock
+            {
+                FontSize = 13,
+                Foreground = Brushes.White,
+                TextAlignment = TextAlignment.Center,
+            };
+            _toast = new Border
+            {
+                Child = label,
+                Background = new System.Windows.Media.SolidColorBrush(
+                    System.Windows.Media.Color.FromArgb(0xE0, 0x16, 0x14, 0x1E)),
+                BorderBrush = new System.Windows.Media.SolidColorBrush(
+                    System.Windows.Media.Color.FromArgb(0x40, 0xFF, 0xFF, 0xFF)),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(10),
+                Padding = new Thickness(14, 7, 14, 7),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Top,
+                Margin = new Thickness(0, 14, 0, 0),
+                IsHitTestVisible = false,
+                Opacity = 0,
+            };
+            Panel.SetZIndex(_toast, 90);
+            _root.Children.Add(_toast);
+            _toastTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1500) };
+            _toastTimer.Tick += (_, _) =>
+            {
+                _toastTimer!.Stop();
+                if (_toast != null) _toast.Opacity = 0;
+            };
+        }
+        ((TextBlock)_toast.Child).Text = text;
+        _toast.Opacity = 1;
+        _toastTimer!.Stop();
+        _toastTimer.Start();
+    }
+
     // ---------- window plumbing ----------
     /// <summary>
     /// "显示在其他应用上层". A plain topmost window still loses to another topmost window that gets
@@ -311,8 +369,11 @@ public sealed class DesktopLyricsWindow : Window
     /// </summary>
     private void ApplyOverlayTopmost()
     {
+        // 唯一的置顶开关。关掉它就是普通窗口：别的窗口（包括播放器自己）会盖住歌词，这样开关
+        // 两个方向都能立刻看见变化；以前还叠了一个 Topmost，普通窗口下两边画面一模一样，
+        // 用户只能判成「关了也还在上面」。
         bool above = _settings.OverlayAboveApps && _settings.BackdropMode == BackdropMode.Transparent;
-        Topmost = above || _settings.Topmost;
+        Topmost = above;
         if (above) RaiseAbove();
         SetForegroundHook(above);
         SetAboveWatchdog(above);
@@ -324,11 +385,28 @@ public sealed class DesktopLyricsWindow : Window
         if (hwnd == IntPtr.Zero) return;
         // Our own settings window / dialogs must stay usable: while one of them is the active window
         // the overlay stays out of the way instead of parking itself over the sliders.
-        if (OwnWindowActive()) return;
+        if (OwnWindowActive())
+        {
+            _raiseSkipped++;
+            return;
+        }
+        _raiseCount++;
         NativeMethods.SetWindowPos(hwnd, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
             NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE |
             NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_NOOWNERZORDER);
+        _raiseError = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
     }
+
+    private int _raiseCount;
+    private int _raiseSkipped;
+    private int _raiseError;
+
+    /// <summary>QA (--above-qa): how often the overlay actually asked to be put on top, how often it
+    /// stood down because one of our own windows was active, and the last Win32 error.</summary>
+    public string DebugAboveState =>
+        $"raises={_raiseCount} skipped={_raiseSkipped} err={_raiseError} " +
+        $"hook={(_foregroundHook != IntPtr.Zero)} watchdog={(_aboveWatchdogTimer != null)} " +
+        $"visible={IsVisible} topmost={Topmost}";
 
     private bool OwnWindowActive()
     {
@@ -371,7 +449,9 @@ public sealed class DesktopLyricsWindow : Window
         if (_aboveWatchdogTimer != null) return;
         // Safety net for windows that re-raise themselves without a foreground change (toggling
         // fullscreen inside a game). Only acts when something really is above — no constant churn.
-        _aboveWatchdogTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1500) };
+        // 700 ms, not 1.5 s: another topmost window that grabs the top every frame otherwise keeps the
+        // overlay buried for a visible moment.
+        _aboveWatchdogTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(700) };
         _aboveWatchdogTimer.Tick += (_, _) =>
         {
             if (!_settings.OverlayAboveApps || _settings.BackdropMode != BackdropMode.Transparent) return;
@@ -927,15 +1007,9 @@ public sealed class DesktopLyricsWindow : Window
         };
         menu.Items.Add(backdrop);
 
-        var topmost = new MenuItem { Header = "窗口置顶", IsCheckable = true, IsChecked = _settings.Topmost };
-        topmost.Click += (_, _) =>
-        {
-            _settings.Topmost = !_settings.Topmost;
-            SettingsStore.Save(_settings);
-            Topmost = _settings.Topmost;
-        };
-        menu.Items.Add(topmost);
-
+        // 「窗口置顶」和「显示在其他应用上层」原本是两个开关，但它们的区别用户看不出来：只要
+        // 置顶开着，普通窗口下两种状态画面完全一样。现在只有一个总开关（下面那个），所以这里
+        // 只保留「显示在其他应用上层」，关掉它是真的落到普通窗口层级（立刻生效，不需要切窗口）。
         var aboveApps = new MenuItem
         {
             Header = "显示在其他应用上层",

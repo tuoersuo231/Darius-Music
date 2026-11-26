@@ -18,7 +18,10 @@
           <Image x:Name="themeImage" Stretch="UniformToFill" HorizontalAlignment="Center" VerticalAlignment="Center" />
         </Grid.Children>
       </Grid>
-      <Border x:Name="sidebarLayer" Grid.Column="0" Background="{DynamicResource SidebarBrush}" BorderBrush="{DynamicResource HairlineBrush}" BorderThickness="0,0,1,0">
+      <!-- No border at all: the sidebar's 1 DIP border brush is now transparent, and a Border paints its
+           Background only *inside* its border, so that column was left unpainted — over a 0xDA panel it
+           showed the raw cover as a 1 px bright seam down the whole window (user report: 没有覆盖的背景色线条). -->
+      <Border x:Name="sidebarLayer" Grid.Column="0" Background="{DynamicResource SidebarBrush}">
         <Border.Child>
           <Grid>
             <Grid.RowDefinitions>
@@ -85,7 +88,9 @@
                     <Grid Margin="6,18,0,4">
                       <Grid.Children>
                         <TextBlock Text="歌单" Style="{StaticResource SectionLabel}" Margin="0,0,0,0" VerticalAlignment="Center" />
-                        <Button x:Name="btnNewPlaylist" Click="OnNewPlaylistClick" Style="{StaticResource GhostButton}" HorizontalAlignment="Right" Padding="8,2,8,2" FontSize="11">+ 新建</Button>
+                        <!-- Text-only: a filled ghost button on a 0xDA plate composites twice and reads as
+                             an opaque chip (same as the search box). -->
+                        <Button x:Name="btnNewPlaylist" Click="OnNewPlaylistClick" Style="{StaticResource GhostButton}" Background="#00FFFFFF" BorderBrush="#00FFFFFF" BorderThickness="0" HorizontalAlignment="Right" Padding="8,2,8,2" FontSize="11">+ 新建</Button>
                       </Grid.Children>
                     </Grid>
                     <ListBox x:Name="lstPlaylists" SelectionChanged="OnPlaylistSelected" PreviewMouseLeftButtonDown="OnPlaylistItemClick" Background="#00FFFFFF" BorderThickness="0,0,0,0" ScrollViewer.HorizontalScrollBarVisibility="Disabled" MaxHeight="320">
@@ -182,6 +187,13 @@
                       </StackPanel.Children>
                     </StackPanel>
                   </Button>
+                  <Button x:Name="btnOpenHotkeys" Click="OnOpenHotkeysClick" Style="{StaticResource GhostButton}" Background="#00FFFFFF" BorderBrush="#00FFFFFF" HorizontalContentAlignment="Left" Padding="8,6,8,6">
+                    <StackPanel Orientation="Horizontal">
+                      <StackPanel.Children>
+                        <TextBlock Text="快捷键" FontSize="12" />
+                      </StackPanel.Children>
+                    </StackPanel>
+                  </Button>
                   <Button x:Name="btnCheckUpdate" Click="OnCheckUpdateClick" Style="{StaticResource GhostButton}" Background="#00FFFFFF" BorderBrush="#00FFFFFF" HorizontalContentAlignment="Stretch" Padding="8,6,8,6">
                     <Grid>
                       <Grid.ColumnDefinitions>
@@ -242,20 +254,24 @@
                     <StackPanel.Children>
                       <Grid Width="190" Margin="0,0,10,0">
                         <Grid.Children>
-                          <TextBox x:Name="txtSearch" TextChanged="OnSearchChanged" KeyDown="OnSearchKeyDown" Padding="28,7,10,7" />
-                          <TextBlock Text="" FontFamily="Segoe MDL2 Assets" FontSize="11" Foreground="{DynamicResource TextFaintBrush}" Margin="10,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False" />
-                          <TextBlock x:Name="txtSearchHint" Text="搜索歌曲 / 歌手 / 专辑" FontSize="12" Foreground="{DynamicResource TextFaintBrush}" Margin="28,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False">
-                            <TextBlock.Style>
-                              <Style TargetType="{x:Type TextBlock}">
-                                <Setter Property="Visibility" Value="Collapsed" />
+                          <!-- No fill at rest: with a photo backdrop every panel is a 0xDA plate, so a filled box
+                               on top of it composited twice and read as an opaque chip painted in the 背景色
+                               itself (user report: 这些UI没有透色). While the box is in use it still lifts to
+                               the inset step and gets the accent border from the TextBox style, so the field
+                               is not a blind click target. -->
+                          <TextBox x:Name="txtSearch" TextChanged="OnSearchChanged" KeyDown="OnSearchKeyDown" Padding="28,7,10,7">
+                            <TextBox.Style>
+                              <Style TargetType="TextBox" BasedOn="{StaticResource {x:Type TextBox}}">
+                                <Setter Property="Background" Value="#00FFFFFF" />
                                 <Style.Triggers>
-                                  <DataTrigger Binding="{Binding Text, ElementName=txtSearch}" Value="">
-                                    <Setter Property="Visibility" Value="Visible" />
-                                  </DataTrigger>
+                                  <Trigger Property="IsKeyboardFocused" Value="True">
+                                    <Setter Property="Background" Value="{DynamicResource InsetBrush}" />
+                                  </Trigger>
                                 </Style.Triggers>
                               </Style>
-                            </TextBlock.Style>
-                          </TextBlock>
+                            </TextBox.Style>
+                          </TextBox>
+                          <TextBlock Text="" FontFamily="Segoe MDL2 Assets" FontSize="11" Foreground="{DynamicResource TextFaintBrush}" Margin="10,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False" />
                         </Grid.Children>
                       </Grid>
                       <Button x:Name="btnPlayAll" Click="OnPlayAllClick" Style="{StaticResource PlayButton}" Width="38" Height="38" ToolTipService.ToolTip="播放全部">
@@ -276,7 +292,9 @@
                   <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
                 <Grid.Children>
-                  <Border Margin="12,8,12,0" BorderBrush="{DynamicResource HairlineBrush}" BorderThickness="0,0,0,1" Padding="0,0,0,7">
+                  <!-- Same 1 px trap as the sidebar: a transparent bottom border leaves an unpainted row
+                       above the song list, which read as a horizontal background-coloured line. -->
+                  <Border Margin="12,8,12,0" Padding="0,0,0,7">
                     <Border.Child>
                       <Grid>
                         <Grid.ColumnDefinitions>
@@ -433,11 +451,10 @@
           </Border>
           <!-- No gap above the player bar: the 12 DIP strip used to show the raw (bright) cover
                backdrop through it, which read as a missing block under the song list. -->
-          <Border Grid.Row="2" Height="92" Margin="0" Background="{DynamicResource CardBrush}" BorderBrush="{DynamicResource HairlineBrush}" BorderThickness="0,1,0,0">
+          <Border Grid.Row="2" Height="92" Margin="0" Background="{DynamicResource CardBrush}">
             <Border.Child>
               <Grid>
                 <Grid.Children>
-                  <Rectangle Height="1" VerticalAlignment="Top" Fill="{DynamicResource AccentLineBrush}" />
                   <Grid x:Name="playerBar" MouseLeftButtonUp="OnPlayerBarClick" Margin="24,0,24,0" Background="#00FFFFFF">
                     <Grid.RowDefinitions>
                       <RowDefinition Height="*" />
@@ -494,7 +511,8 @@
                           </StackPanel>
                           <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
                             <StackPanel.Children>
-                              <Button x:Name="btnPlayMode" Click="OnPlayModeClick" Style="{StaticResource GhostButton}" Height="28" Padding="10,0,10,0" Margin="0,0,16,0" ToolTipService.ToolTip="单击切换：顺序播放 / 单曲循环">
+                              <!-- Text-only, like + 新建: the pill used to be the same colour as the bar. -->
+                              <Button x:Name="btnPlayMode" Click="OnPlayModeClick" Style="{StaticResource GhostButton}" Background="#00FFFFFF" BorderBrush="#00FFFFFF" BorderThickness="0" Height="28" Padding="10,0,10,0" Margin="0,0,16,0" ToolTipService.ToolTip="单击切换：顺序播放 / 单曲循环">
                                 <StackPanel Orientation="Horizontal">
                                   <StackPanel.Children>
                                     <TextBlock x:Name="txtPlayModeIcon" Text="⇉" FontSize="12" Margin="0,0,6,0" Foreground="{DynamicResource TextDimBrush}" />
