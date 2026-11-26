@@ -6,10 +6,6 @@ Windows 桌面音乐播放器 + 桌面歌词。WPF / .NET 10，无安装器、�
 
 ![主界面](docs/screenshots/main-window.png)
 
-| 桌面歌词 | 设置 |
-|---|---|
-| ![桌面歌词](docs/screenshots/desktop-lyrics.png) | ![设置](docs/screenshots/settings.png) |
-
 | 播放页 · 浅色封面 | 播放页 · 深色封面 |
 |---|---|
 | ![播放页](docs/screenshots/player-page-light.png) | ![播放页](docs/screenshots/player-page-dark.png) |
