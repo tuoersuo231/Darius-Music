@@ -62,7 +62,7 @@ public sealed class DesktopLyricsWindow : Window
         Background = Brushes.Transparent;
         ShowInTaskbar = false;
         ShowActivated = false;
-        Topmost = settings.Topmost;
+        Topmost = settings.Topmost || settings.OverlayAboveApps;
         ResizeMode = ResizeMode.NoResize;
         WindowStartupLocation = WindowStartupLocation.Manual;
         Title = "Darius Music";
@@ -156,6 +156,8 @@ public sealed class DesktopLyricsWindow : Window
         {
             System.Windows.Media.CompositionTarget.Rendering -= OnCompositionRendering;
             _player.CoverChanged -= OnCoverArrived;
+            SetForegroundHook(false);
+            SetAboveWatchdog(false);
         };
 
         Loaded += (_, _) =>
@@ -173,6 +175,7 @@ public sealed class DesktopLyricsWindow : Window
         SourceInitialized += (_, _) =>
         {
             ApplyWindowStyles();
+            ApplyOverlayTopmost();
             if (PresentationSource.FromVisual(this) is HwndSource source) source.AddHook(WndProc);
         };
         // 背景宽高 changes the window size, and ActualWidth still reports the *old* size while
@@ -298,6 +301,126 @@ public sealed class DesktopLyricsWindow : Window
     }
 
     // ---------- window plumbing ----------
+    /// <summary>
+    /// "显示在其他应用上层". A plain topmost window still loses to another topmost window that gets
+    /// activated — most fullscreen games, media players and Task Manager are topmost — so a topmost
+    /// overlay ends up hidden behind them. With this on, the overlay puts itself back at the top of the
+    /// topmost band every time another window is activated (no activation of its own: the window is
+    /// WS_EX_NOACTIVATE, so the bump never takes focus from the app underneath).
+    /// Transparent backdrop only; <see cref="AppSettings.Normalized"/> clears it in the other modes.
+    /// </summary>
+    private void ApplyOverlayTopmost()
+    {
+        bool above = _settings.OverlayAboveApps && _settings.BackdropMode == BackdropMode.Transparent;
+        Topmost = above || _settings.Topmost;
+        if (above) RaiseAbove();
+        SetForegroundHook(above);
+        SetAboveWatchdog(above);
+    }
+
+    private void RaiseAbove()
+    {
+        var hwnd = new WindowInteropHelper(this).Handle;
+        if (hwnd == IntPtr.Zero) return;
+        // Our own settings window / dialogs must stay usable: while one of them is the active window
+        // the overlay stays out of the way instead of parking itself over the sliders.
+        if (OwnWindowActive()) return;
+        NativeMethods.SetWindowPos(hwnd, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
+            NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE |
+            NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_NOOWNERZORDER);
+    }
+
+    private bool OwnWindowActive()
+    {
+        var app = System.Windows.Application.Current;
+        if (app == null) return false;
+        foreach (Window window in app.Windows)
+            if (!ReferenceEquals(window, this) && window.IsActive) return true;
+        return false;
+    }
+
+    private System.Windows.Threading.DispatcherTimer? _raiseSoon;
+    private System.Windows.Threading.DispatcherTimer? _aboveWatchdogTimer;
+
+    /// <summary>
+    /// A window that takes the foreground is raised *after* the foreground event is delivered, so a
+    /// bump from inside the event loses the race and the newcomer stays on top. Do it again on the next
+    /// dispatcher turn and once more a beat later (a game that goes fullscreen raises itself twice).
+    /// </summary>
+    private void QueueRaise()
+    {
+        Dispatcher.BeginInvoke(new Action(RaiseAbove), System.Windows.Threading.DispatcherPriority.Background);
+        if (_raiseSoon == null)
+        {
+            _raiseSoon = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(220) };
+            _raiseSoon.Tick += (_, _) => { _raiseSoon!.Stop(); RaiseAbove(); };
+        }
+        _raiseSoon.Stop();
+        _raiseSoon.Start();
+    }
+
+    private void SetAboveWatchdog(bool on)
+    {
+        if (!on)
+        {
+            _aboveWatchdogTimer?.Stop();
+            _aboveWatchdogTimer = null;
+            _raiseSoon?.Stop();
+            return;
+        }
+        if (_aboveWatchdogTimer != null) return;
+        // Safety net for windows that re-raise themselves without a foreground change (toggling
+        // fullscreen inside a game). Only acts when something really is above — no constant churn.
+        _aboveWatchdogTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1500) };
+        _aboveWatchdogTimer.Tick += (_, _) =>
+        {
+            if (!_settings.OverlayAboveApps || _settings.BackdropMode != BackdropMode.Transparent) return;
+            if (AnythingAbove()) RaiseAbove();
+        };
+        _aboveWatchdogTimer.Start();
+    }
+
+    /// <summary>True when some other visible window sits above this one in z-order.</summary>
+    private bool AnythingAbove()
+    {
+        var hwnd = new WindowInteropHelper(this).Handle;
+        if (hwnd == IntPtr.Zero || !IsVisible) return false;
+        IntPtr h = NativeMethods.GetTopWindow(IntPtr.Zero);
+        int guard = 0;
+        while (h != IntPtr.Zero && guard++ < 400)
+        {
+            if (NativeMethods.IsWindowVisible(h))
+                return h != hwnd;      // the first visible window is either us (nothing above) or not
+            h = NativeMethods.GetWindow(h, NativeMethods.GW_HWNDNEXT);
+        }
+        return false;
+    }
+
+    private NativeMethods.WinEventDelegate? _foregroundProc;
+    private IntPtr _foregroundHook;
+
+    private void SetForegroundHook(bool on)
+    {
+        if (on)
+        {
+            if (_foregroundHook != IntPtr.Zero) return;
+            _foregroundProc = (_, _, hwnd, _, _, _, _) =>
+            {
+                if (!_settings.OverlayAboveApps || _settings.BackdropMode != BackdropMode.Transparent) return;
+                if (hwnd == new WindowInteropHelper(this).Handle) return;
+                QueueRaise();
+            };
+            _foregroundHook = NativeMethods.SetWinEventHook(
+                NativeMethods.EVENT_SYSTEM_FOREGROUND, NativeMethods.EVENT_SYSTEM_FOREGROUND,
+                IntPtr.Zero, _foregroundProc, 0, 0, NativeMethods.WINEVENT_OUTOFCONTEXT);
+            return;
+        }
+        if (_foregroundHook == IntPtr.Zero) return;
+        NativeMethods.UnhookWinEvent(_foregroundHook);
+        _foregroundHook = IntPtr.Zero;
+        _foregroundProc = null;
+    }
+
     private void ApplyWindowStyles()
     {
         var hwnd = new WindowInteropHelper(this).Handle;
@@ -317,7 +440,8 @@ public sealed class DesktopLyricsWindow : Window
         {
             var line = $"{DateTime.Now:HH:mm:ss} {where} visible={IsVisible} opacity={_root.Opacity:0.00} " +
                        $"rect={Left:0},{Top:0} {Width:0}x{Height:0} doc={(_player.Lyrics?.Lines.Count ?? 0)} " +
-                       $"stackdoc={_stack.HasDocument} stack={_stack.Visibility} meta={_meta.Visibility} enabled={_settings.Enabled}";
+                       $"stackdoc={_stack.HasDocument} stack={_stack.Visibility} meta={_meta.Visibility} enabled={_settings.Enabled} " +
+                       $"above={_settings.OverlayAboveApps} topmost={Topmost} hook={(_foregroundHook != IntPtr.Zero)} mode={_settings.BackdropMode}";
             System.IO.File.AppendAllText(System.IO.Path.Combine(AppPaths.DataDir, "overlay.log"), line + Environment.NewLine);
         }
         catch { }
@@ -408,7 +532,7 @@ public sealed class DesktopLyricsWindow : Window
     public void ApplySettings(AppSettings settings)
     {
         _settings = settings;
-        Topmost = settings.Topmost;
+        ApplyOverlayTopmost();
         _stack.ApplySettings(settings, 1.0);
         ApplyPerspective(settings.Perspective, settings.TiltAngle);
 
@@ -820,6 +944,21 @@ public sealed class DesktopLyricsWindow : Window
             Topmost = _settings.Topmost;
         };
         menu.Items.Add(topmost);
+
+        var aboveApps = new MenuItem
+        {
+            Header = "显示在其他应用上层",
+            IsCheckable = true,
+            IsChecked = _settings.OverlayAboveApps,
+            IsEnabled = _settings.BackdropMode == BackdropMode.Transparent,
+        };
+        aboveApps.Click += (_, _) =>
+        {
+            _settings.OverlayAboveApps = !_settings.OverlayAboveApps;
+            SettingsStore.Save(_settings);
+            ApplySettings(_settings);
+        };
+        menu.Items.Add(aboveApps);
 
         menu.Items.Add(new Separator());
         var previous = new MenuItem { Header = "上一首" };

@@ -38,6 +38,8 @@ public partial class SettingsWindow : Window
         chkLocked.Unchecked += (_, _) => Apply(s => s.Locked = false);
         chkTopmost.Checked += (_, _) => Apply(s => s.Topmost = true);
         chkTopmost.Unchecked += (_, _) => Apply(s => s.Topmost = false);
+        chkAboveApps.Checked += (_, _) => { if (!_syncingUi) Apply(s => s.OverlayAboveApps = true); };
+        chkAboveApps.Unchecked += (_, _) => { if (!_syncingUi) Apply(s => s.OverlayAboveApps = false); };
         sldTilt.ValueChanged += (_, _) =>
         {
             lblTilt.Text = $"{sldTilt.Value:0}°";
@@ -82,6 +84,7 @@ public partial class SettingsWindow : Window
         chkGlow.IsChecked = _settings.GlowEnabled;
         chkLocked.IsChecked = _settings.Locked;
         chkTopmost.IsChecked = _settings.Topmost;
+        chkAboveApps.IsChecked = _settings.OverlayAboveApps;
         chkPerspective.IsChecked = _settings.Perspective;
         sldTilt.Value = _settings.TiltAngle;
         sldVp.Value = _settings.VanishingOffset;
@@ -192,6 +195,15 @@ public partial class SettingsWindow : Window
         btnGlowColor.Background = new SolidColorBrush(DesktopLyricsWindow.ParseColor(_settings.GlowColor));
         glowPanel.IsEnabled = _settings.GlowEnabled;
         glowPanel.Opacity = _settings.GlowEnabled ? 1 : 0.45;
+        // 显示在其他应用上层 only makes sense over a transparent backdrop (an opaque panel parked on
+        // top of every app is not usable), so the row follows the backdrop mode. Normalized() clears the
+        // flag in the other modes; the checkbox has to be pulled back to that value without re-applying.
+        bool transparent = _settings.BackdropMode == BackdropMode.Transparent;
+        aboveRow.IsEnabled = transparent;
+        aboveRow.Opacity = transparent ? 1 : 0.45;
+        _syncingUi = true;
+        chkAboveApps.IsChecked = _settings.OverlayAboveApps;
+        _syncingUi = false;
         txtSummary.Text = _settings.Enabled ? "已开启 · 播放音乐后同步显示" : "已关闭，样式与位置会保留";
     }
 
@@ -205,6 +217,7 @@ public partial class SettingsWindow : Window
     }
 
     private bool _applyQueued;
+    private bool _syncingUi;
 
     private void Apply(Action<AppSettings> change)
     {
@@ -257,6 +270,7 @@ public partial class SettingsWindow : Window
         to.GlowColor = from.GlowColor;
         to.Locked = from.Locked;
         to.Topmost = from.Topmost;
+        to.OverlayAboveApps = from.OverlayAboveApps;
         to.Scale = from.Scale;
         to.FontFamily = from.FontFamily;
         to.Volume = from.Volume;
@@ -316,6 +330,9 @@ public partial class SettingsWindow : Window
 
     /// <summary>QA: exactly what the inline picker fires while a colour is dragged.</summary>
     internal void DebugPreviewGlowColor(string hex) => Preview(s => s.GlowColor = hex);
+
+    /// <summary>QA: the same live path for 文字颜色.</summary>
+    internal void DebugPreviewTextColor(string hex) => Preview(s => s.TextColor = hex);
 
     /// <summary>QA: the 确定 path (commit + repaint the swatches).</summary>
     internal void DebugCommitGlowColor(string hex)

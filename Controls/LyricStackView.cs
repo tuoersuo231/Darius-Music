@@ -19,13 +19,29 @@ public sealed class WordSegment
 {
     public Rect Box;
     public Geometry? Ink;
+    /// <summary>Baked copy of <see cref="Ink"/> (device pixels) and where to draw it — the karaoke
+    /// fill blits this instead of filling the glyph outlines again every frame.</summary>
+    public BitmapSource? Baked;
+    public Rect BakedRect;
+    /// <summary>Device pixels per DIP the image was rasterised at. The image is baked as soon as the
+    /// segment exists, not when the reading line is baked: the reading-line bake is prepared one frame
+    /// ahead for a cue that has no word segments yet, so relying on that bake left every segment
+    /// without an image and the karaoke fill silently drew nothing.</summary>
+    public double BakedScale;
+    /// <summary>Text colour baked into <see cref="Baked"/>. The glyph pixels carry the colour, so a
+    /// colour change has to re-rasterise the image — this is what tells it apart from a fresh one.</summary>
+    public Color BakedColor;
 }
 
 public sealed class LyricStackView : FrameworkElement
 {
 
+    /// <summary>Scroll + grow timing. The 380/300 ms pair felt rushed; this is back to the 620/420 ms
+    /// the user preferred, with the outgoing row still shrinking first so two full-size rows never
+    /// cross in place.</summary>
     private const double ScrollDurationMs = 620;
     private const double MorphDurationMs = 420;
+    private const double MorphDelayMs = 40;
     private const double LineHeightRatio = 1.45;
 
     private LyricDocument? _doc;
@@ -40,6 +56,19 @@ public sealed class LyricStackView : FrameworkElement
 
     private double _fontSize = 64;
     private double _columnWidth = 680;
+
+    /// <summary>Device pixels per DIP, refreshed once per paint. Baked text is blitted on this pixel
+    /// grid: a fractional destination makes WPF resample the whole line, which is what makes blitted
+    /// text look softer than the vector original.</summary>
+    private double _pxPerDip = 1;
+    private double Snap(double value) => _pxPerDip > 0.1 ? Math.Round(value * _pxPerDip) / _pxPerDip : value;
+
+    /// <summary>Baked-text renderer switch (A/B for QA). true =每行预烘成位图，逐帧只贴图；
+    /// false = 老的字形轮廓填充。`LYRIC_NOBAKE=1` 可在不改代码的情况下做同一帧的 A/B。</summary>
+    internal static bool UseBakedText = Environment.GetEnvironmentVariable("LYRIC_NOBAKE") != "1";
+    /// <summary>Re-rasterise the line images when the text colour changes. `LYRIC_NOCOLOR=1` restores
+    /// the old behaviour (the colour was baked in but never re-baked) for an A/B on one binary.</summary>
+    internal static bool RecolorOnTextColorChange = Environment.GetEnvironmentVariable("LYRIC_NOCOLOR") != "1";
     private double _lineGap = 6;
     private double _anchor = 0.5;
     private string _fontName = FontResolver.WenKai;
@@ -190,6 +219,7 @@ public sealed class LyricStackView : FrameworkElement
         bool oldTranslation = _translation;
         bool oldGlow = _glowEnabled && _glowStrength > 0.001;
         Color oldGlowColor = _glowColor;
+        Color oldTextColor = _textColor;
 
         _fontSize = settings.DisplayFontSize * dpiScale;
         _columnWidth = settings.LineWidth * dpiScale;
@@ -213,7 +243,7 @@ public sealed class LyricStackView : FrameworkElement
         _perspective = settings.Perspective;
         _neighbourScale = 1.0 / Math.Clamp(settings.CurrentScale, 1.0, 2.6);
         _visibleLines = Math.Clamp(settings.VisibleLines, 3, MaxVisibleLines);
-        _tilt = Math.Clamp(settings.TiltAngle, -60, 0);
+        _tilt = Math.Clamp(settings.TiltAngle, -88, 0);
         _vpOffset = Math.Clamp(settings.VanishingOffset, 0.25, 6.0);
         _glowRadius = Math.Max(4, 0.26 * _fontSize * settings.GlowRadiusScale);
         _fontName = settings.FontFamily;
@@ -225,6 +255,10 @@ public sealed class LyricStackView : FrameworkElement
         // colour drag repaints instead of re-rasterising thirteen words (that is what froze the glow
         // while the colour was being picked).
         bool glowColorChanged = _glowColor != oldGlowColor;
+        // 辉光半径不在这里：它只影响光晕蒙版，文字和逐字高亮都不变。以前它算"几何变化"，于是拖
+        // 「辉光范围」滑条每一步都丢掉整列几何 —— 朗读行会先掉回没建逐字的渲染（只剩两三个亮词、
+        // 光晕也没了），下一帧再长回来，看上去就是字幕在闪。现在只就地重糊光晕（见 RefreshGlowHalos）。
+        bool glowRadiusChanged = Math.Abs(_glowRadius - oldGlowRadius) > 0.01;
         bool geometryChanged =
             fontChanged ||
             _perspective != oldPerspective ||
@@ -232,13 +266,18 @@ public sealed class LyricStackView : FrameworkElement
             Math.Abs(_columnWidth - oldColumn) > 0.01 ||
             Math.Abs(_tilt - oldTilt) > 0.01 ||
             Math.Abs(_vpOffset - oldVp) > 0.001 ||
-            Math.Abs(_glowRadius - oldGlowRadius) > 0.01 ||
             _translation != oldTranslation ||
             (_glowEnabled && _glowStrength > 0.001) != oldGlow ||
             (glowColorChanged && DebugGlowColorRebuild);
 
         if (geometryChanged) InvalidateCache();
         else if (glowColorChanged) RecolorHalos();
+        if (glowRadiusChanged && !geometryChanged) InvalidateGlowHalos();
+        // 文字颜色是烘进位图的（字形像素本身就是那个颜色），所以它不重建几何、但必须重烘贴图。
+        // 以前这里什么也没做：改色只改了 _textColor，逐帧贴的还是旧颜色的图片，于是「文字颜色没反应」。
+        // LYRIC_NOCOLOR=1 退回旧行为，给同一份二进制做 A/B。
+        if (_textColor != oldTextColor && RecolorOnTextColorChange)
+            QueueRecolor();
         if (fontChanged)
         {
             _typefaces.Clear();
@@ -294,6 +333,17 @@ public sealed class LyricStackView : FrameworkElement
         InvalidateVisual();
     }
 
+    /// <summary>Per-frame advance for the composition-driven path. The player clock only fires every
+    /// 16 ms, so repainting from it capped the karaoke at 60 Hz; this is called once per rendered
+    /// frame instead, and skips the repaint when neither the position nor an animation moved — a
+    /// 179 Hz call rate must not become 179 full repaints per second.</summary>
+    public void Advance(long positionMs)
+    {
+        bool animating = _scrollDelta != 0 || _morphing;
+        if (positionMs == _positionMs && !animating) return;
+        Tick(positionMs);
+    }
+
     /// <summary>Forces animated values to rest (used by the PNG previews).</summary>
     public void Snap()
     {
@@ -309,18 +359,32 @@ public sealed class LyricStackView : FrameworkElement
         if (_scrollDelta != 0)
         {
             double t = Math.Clamp((Now - _scrollStart) / ScrollDurationMs, 0, 1);
-            // Smoothstep, not ease-out: a cubic ease-out covers ~29% of the distance in the first
-            // 45 ms, which reads as a jump followed by a slide. Both ends of this one are gentle.
+            // Smoothstep again: at 620 ms the user prefers the symmetric feel, and a quart ease at
+            // this length reads as a lurch.
             _scrollDelta = t >= 1 ? 0 : _scrollFrom * (1 - BackdropBlur.Smooth(t));
         }
-        if (_morphing && Now - _morphStart >= MorphDurationMs) _morphing = false;
+        if (_morphing && Now - _morphStart >= MorphDelayMs + MorphDurationMs) _morphing = false;
     }
 
     private static double EaseOut(double t) => 1 - Math.Pow(1 - t, 3);
 
     private double MorphProgress => !_morphing || _previous < 0 || _previous == _current
         ? 1
-        : EaseOut(Math.Clamp((Now - _morphStart) / MorphDurationMs, 0, 1));
+        : EaseOut(Math.Clamp((Now - _morphStart - MorphDelayMs) / MorphDurationMs, 0, 1));
+
+    /// <summary>Where a row sits between the two looks: 0 = still the reading line (dim unsung text,
+    /// bright sung text, glow), 1 = an ordinary neighbour (one flat bright image). A cue change used to
+    /// swap the row from one look to the other in a single frame — the row that had just finished
+    /// flashed 30% → 100% white for ~100 ms while it slid away, which read as a flicker rather than as
+    /// a transition. The two bakes are now cross-faded over the morph, so both ends match exactly.</summary>
+    private double MorphBlend
+    {
+        get
+        {
+            if (!_morphing || _previous < 0 || _previous == _current) return 1;
+            return BackdropBlur.Smooth(Math.Clamp((Now - _morphStart) / MorphDurationMs, 0, 1));
+        }
+    }
 
     /// <summary>
     /// Global horizontal shift so the *current* cue's projected centre sits exactly at the window
@@ -424,6 +488,10 @@ public sealed class LyricStackView : FrameworkElement
     {
         if (_doc == null || _doc.Lines.Count == 0) return;
         if (width < 2 || height < 2) return;
+        _pxPerDip = VisualTreeHelper.GetDpi(this).DpiScaleX;
+        // Per-frame budget for re-rasterising line images after a text-colour change (see QueueRecolor).
+        _recolorBudget = _recolorPending ? 2 : 0;
+        _recolorStale = false;
 
         // Warm the cache for the visible window before laying anything out. While a settings change is
         // still being rebuilt, only a few lines are built per frame and the previous geometry is drawn
@@ -432,6 +500,7 @@ public sealed class LyricStackView : FrameworkElement
         int half = Math.Max(1, _visibleLines / 2);
         int warmFrom = Math.Max(0, _current - half - 1);
         int warmTo = Math.Min(_doc.Lines.Count - 1, _current + half + 1);
+        bool builtLine = false;
         if (_rebuilding)
         {
             int budget = RebuildLinesPerFrame;
@@ -441,6 +510,7 @@ public sealed class LyricStackView : FrameworkElement
                 if (_cache.ContainsKey(i)) continue;
                 if (budget-- <= 0) { complete = false; break; }
                 BuildLine(i);
+                builtLine = true;
             }
             if (complete)
             {
@@ -453,14 +523,55 @@ public sealed class LyricStackView : FrameworkElement
                     _cache.TryGetValue(_current, out var ready) && ready.WordSegments.Count == 0 &&
                     ready.Line.Words.Count > 0)
                     BuildWordPartsFor(ready);
+                // 拖滑条期间攒下的那次重建，现在接着来：新一轮会用最新的倾斜/交点参数。
+                if (_rebuildAgain)
+                {
+                    _rebuildAgain = false;
+                    InvalidateCache();
+                }
             }
         }
         else
         {
-            for (int i = warmFrom; i <= warmTo; i++) BuildLine(i);
+            // One line per frame, centre first: building the whole warm window in a single frame (a
+            // FormattedText layout per line, plus one boolean geometry per word for the reading line)
+            // is a 16-32 ms stall on the first frame after every cue change.
+            for (int k = 0; k <= warmTo - warmFrom; k++)
+            {
+                int i = _current + (k % 2 == 0 ? k / 2 : -(k / 2 + 1));
+                if (i < warmFrom || i > warmTo || _cache.ContainsKey(i)) continue;
+                BuildLine(i);
+                builtLine = true;
+                break;
+            }
         }
 
         DrawFrostedBackdrop(dc, width, height);
+
+        // The reading-line image for the cue that becomes current NEXT — nothing else needs one, and
+        // only on a frame that did not just build a line. A cue change makes the warm window shift by
+        // one, so the same frame both built the incoming line and baked a reading-line image; those two
+        // 8-12 ms jobs are the 20-25 ms frame that made the switch visibly hitch.
+        int nextCue = _current + 1;
+        if (!builtLine && !_rebuilding && nextCue >= 0 && nextCue < _doc.Lines.Count &&
+            _cache.TryGetValue(nextCue, out var pending) && pending.BakedCurrent == null)
+        {
+            try
+            {
+                double dpiBake = VisualTreeHelper.GetDpi(this).DpiScaleX;
+                if (!(dpiBake > 0.1)) dpiBake = 1.0;
+                pending.BakedCurrent = BakeLine(pending, 0, true, dpiBake);
+            }
+            catch { }
+        }
+
+        // Karaoke ink is the last thing a cue change still had to build. Two words a frame, reading line
+        // first and the following cue after it, so the frame that changes cue has nothing left to do.
+        BuildWordPartsAhead();
+        // Glow radius moved: re-blur a couple of word masks per frame instead of rebuilding the line.
+        // One mask at the largest radius (radius 12 → 150×160 px, three box passes) is ~3 ms, so the
+        // budget is two: a drag keeps the column around 140 fps instead of dropping to ~70.
+        RefreshGlowHalos(2);
 
         double anchorY = height * _anchor;
         double progress = MorphProgress;
@@ -499,14 +610,14 @@ public sealed class LyricStackView : FrameworkElement
             if (Math.Abs(offset) > height) continue;
             if (alpha <= 0.012) continue;
 
-            double y = anchorY + offset - lineHeight / 2;
+            double y = Snap(anchorY + offset - lineHeight / 2);
             // Soft edge for the text itself. It used to ride on EdgeFadeFactor, which returns 1.0 for a
             // transparent backdrop — so with 背景=透明 a long wrapped line was simply cut off by the
             // window edge (user report: 上下文较长时出现明显的断层). The band now follows the font size,
             // and the factor is taken from the whole box instead of its centre, so tall wrapped lines
             // fade out as they leave instead of ending in a step.
             alpha *= TextEdgeFade(y, lineHeight, height);
-            double x = (width - _columnWidth) / 2 + _perspectiveShift;
+            double x = Snap((width - _columnWidth) / 2 + _perspectiveShift);
             if (_perspective)
             {
                 // Clean projective placement: the row's baseline is the projection of a 3D
@@ -514,9 +625,9 @@ public sealed class LyricStackView : FrameworkElement
                 // reading row (d = 0) comes out exactly horizontal.
                 double sLeft = _plane.Scale(0);
                 double sRight = _plane.Scale(_columnWidth);
-                double d = layoutOffset + scroll;
-                double y0 = anchorY + d * sLeft;
-                double y1 = anchorY + d * sRight;
+                double d = Snap(layoutOffset + scroll);
+                double y0 = Snap(anchorY + d * sLeft);
+                double y1 = Snap(anchorY + d * sRight);
                 double x0 = x;
                 double x1 = x + _plane.MapX(_columnWidth);
                 double shear = Math.Abs(x1 - x0) > 1 ? (y1 - y0) / (x1 - x0) : 0;
@@ -525,8 +636,7 @@ public sealed class LyricStackView : FrameworkElement
                 dc.PushTransform(new MatrixTransform(1, shear, 0, 1, 0, 0));
                 if (Math.Abs(scale - 1) > 0.001)
                     dc.PushTransform(new ScaleTransform(scale, scale, _scaleCenterX, 0));
-                if (i == _current) DrawCurrentLine(dc, render, alpha);
-                else DrawPlainLine(dc, render, alpha, Math.Abs(i - _current));
+                DrawRow(dc, render, i, alpha, Math.Abs(i - _current));
                 if (Math.Abs(scale - 1) > 0.001) dc.Pop();
                 dc.Pop();
                 dc.Pop();
@@ -538,8 +648,7 @@ public sealed class LyricStackView : FrameworkElement
             dc.PushTransform(new TranslateTransform(x, y));
             if (Math.Abs(scale - 1) > 0.001) dc.PushTransform(new ScaleTransform(scale, scale, _scaleCenterX, 0));
 
-            if (i == _current) DrawCurrentLine(dc, render, alpha);
-            else DrawPlainLine(dc, render, alpha, Math.Abs(i - _current));
+            DrawRow(dc, render, i, alpha, Math.Abs(i - _current));
 
             if (Math.Abs(scale - 1) > 0.001) dc.Pop();
             dc.Pop();
@@ -548,6 +657,12 @@ public sealed class LyricStackView : FrameworkElement
         // The rebuild is spread over frames, so keep asking for the next one: without this the column
         // would sit on the previous geometry until something else invalidated it.
         if (_rebuilding)
+            Dispatcher.BeginInvoke(new Action(InvalidateVisual), System.Windows.Threading.DispatcherPriority.Render);
+        // Same for a colour change: the neighbours are re-baked a couple per frame, so keep repainting
+        // until every visible line carries the new colour (otherwise a paused player would keep the old
+        // colour on the lines the budget did not reach).
+        _recolorPending = _recolorStale;
+        if (_recolorPending)
             Dispatcher.BeginInvoke(new Action(InvalidateVisual), System.Windows.Threading.DispatcherPriority.Render);
         }
 
@@ -674,19 +789,48 @@ public sealed class LyricStackView : FrameworkElement
     {
         double target = index == _current ? 1 : _neighbourScale;
         if (!_morphing || _previous < 0 || _previous == _current) return target;
-        double from = index == _previous ? 1 : _neighbourScale;
-        return from + (target - from) * progress;
+        if (index != _previous && index != _current) return _neighbourScale;
+
+        // Two full-size rows crossing in place is what read as clumsy: the outgoing row used to keep
+        // its size for the whole 420 ms while the new one grew into it. Now the outgoing row shrinks
+        // first and quickly (finishes in ~55% of the morph) and the incoming row grows after the
+        // slide has started, so the eye follows one row up instead of watching two rows overlap.
+        if (index == _previous)
+        {
+            double t = Math.Clamp((Now - _morphStart) / (MorphDurationMs * 0.55), 0, 1);
+            return 1 + (_neighbourScale - 1) * EaseOut(t);
+        }
+        double incoming = Math.Clamp((Now - _morphStart - MorphDelayMs) / MorphDurationMs, 0, 1);
+        return _neighbourScale + (1 - _neighbourScale) * EaseOut(incoming);
     }
+
     private double AlphaFor(int index, double progress)
     {
+        // 邻行亮度：0.52 时同样的字形看着比朗读行「粗」一档（灰字在深色底上，抗锯齿边更显眼）。
+        // 降到 0.44，笔画看上去立细。
         static double ByDistance(int distance) => distance == 0
             ? 1.0
-            : Math.Clamp(0.52 * Math.Pow(0.66, distance - 1), 0.08, 0.52);
+            : Math.Clamp(0.44 * Math.Pow(0.66, distance - 1), 0.08, 0.44);
 
         double target = ByDistance(Math.Abs(index - _current));
         if (!_morphing || _previous < 0 || _previous == _current) return target;
-        double from = ByDistance(Math.Abs(index - _previous));
-        return from + (target - from) * progress;
+        if (index != _previous && index != _current)
+            return ByDistance(Math.Abs(index - _current));
+
+        // The leaving row dims as it slides away and the arriving row lights up as it grows, so only
+        // one row ever reads as "the line being sung". Both ramps use smoothstep over the whole morph
+        // and end at the neighbour values: an ease-out dropped the finished line to its resting
+        // brightness within two frames, which is the "flash then nothing" the switch looked like.
+        if (index == _previous)
+        {
+            double t = Math.Clamp((Now - _morphStart) / MorphDurationMs, 0, 1);
+            return 1 + (target - 1) * BackdropBlur.Smooth(t);
+        }
+        double incoming = Math.Clamp((Now - _morphStart - MorphDelayMs * 0.5) / (MorphDurationMs * 0.8), 0, 1);
+        // Start exactly at a neighbour's opacity: on the switch frame this row is still drawn with the
+        // neighbour bake, and a jump from 0.52 to 0.42 darkened it for no reason.
+        const double from = 0.52;
+        return from + (1 - from) * BackdropBlur.Smooth(incoming);
     }
 
     private void DrawBackdrop(DrawingContext dc, double width, double height)
@@ -763,6 +907,63 @@ public sealed class LyricStackView : FrameworkElement
         }
     }
 
+    /// <summary>QA: builds every word of the reading line at once. The incremental builder needs dozens
+    /// of real frames, which an offscreen harness does not get.</summary>
+    internal void DebugBuildAllWordParts()
+    {
+        var render = GetLine(_current);
+        if (render == null) return;
+        BuildWordPartsFor(render);
+        InvalidateVisual();
+    }
+
+    /// <summary>Diagnostics: which family/face actually renders the lyrics. The family name alone is
+    /// not enough — a family that ships a real Medium face renders a whole weight heavier than a font
+    /// that only has a Medium file (WPF then picks the closest face, which is that only face).</summary>
+    public string DebugFont
+    {
+        get
+        {
+            var tf = TypefaceFor(true);
+            string face = "?";
+            try
+            {
+                if (tf.TryGetGlyphTypeface(out var glyph))
+                    face = string.Join("/", glyph.FamilyNames.Values.Distinct()) + " weight=" + glyph.Weight +
+                           " style=" + glyph.Style;
+            }
+            catch { }
+            return $"font='{_fontName}' resolved={tf.FontFamily.Source} {face}";
+        }
+    }
+
+    /// <summary>Diagnostics: karaoke state of the reading line — how many words the clock says have
+    /// started, how many have ink built, and how many fragments actually carry a baked image (a zero
+    /// there means the fill has nothing to blit and the line stays at the dim base).</summary>
+    public string DebugKaraoke
+    {
+        get
+        {
+            var render = GetLine(_current);
+            if (render == null) return "karaoke: cur=null";
+            int started = 0, parts = 0, withInk = 0, withImage = 0;
+            var words = render.Line.Words;
+            for (int i = 0; i < words.Count; i++)
+            {
+                if (LyricTiming.WordProgress(words[i], _positionMs) > 0) started++;
+                if (i >= render.WordSegments.Count) continue;
+                foreach (var part in render.WordSegments[i])
+                {
+                    parts++;
+                    if (part.Ink != null) withInk++;
+                    if (part.Baked != null) withImage++;
+                }
+            }
+            return $"karaoke: pos={_positionMs} cur={_current} words={words.Count} built={render.WordBuilt} " +
+                   $"started={started} parts={parts} ink={withInk} imgs={withImage}";
+        }
+    }
+
     /// <summary>Diagnostics: what the reading line actually has to draw, in one line.</summary>
     public string DebugInkState
     {
@@ -778,8 +979,347 @@ public sealed class LyricStackView : FrameworkElement
         }
     }
 
+    // ---------- baked text: per-frame blits instead of glyph-outline fills ----------
+
+    /// <summary>One line pre-rasterised at device resolution. Per frame the column draws this image —
+    /// plus a clipped copy for the sung part — instead of filling every glyph outline again. The
+    /// outline fills cost ~8 ms per frame at 1226×782; the blits cost about 0.3 ms.</summary>
+    private sealed class BakedText
+    {
+        public BitmapSource Base = null!;
+        public BitmapSource? Sung;
+        public Rect Rect;
+        public double Scale = 1;
+        public int Distance = -1;
+        public bool Current;
+        /// <summary>Text colour baked into both images; a mismatch means "stale, re-rasterise".</summary>
+        public Color Color;
+    }
+
+    private BakedText? EnsureBaked(LineRender render, int distance, bool current)
+    {
+        double dpi = VisualTreeHelper.GetDpi(this).PixelsPerDip;
+        if (!(dpi > 0.1)) dpi = 1.0;
+        var ready = current ? render.BakedCurrent : render.BakedPlain;
+        if (ready != null && Math.Abs(ready.Scale - dpi) < 0.02 &&
+            (ready.Color == _textColor || !RecolorOnTextColorChange)) return ready;
+        // The reading line always re-rasterises at once (it is the one the colour is being judged on);
+        // the neighbours share a small per-frame budget so a colour drag does not re-rasterise the whole
+        // column in one frame (~40 ms) — they show the previous colour for a few frames instead.
+        if (!current && ready != null && _recolorBudget <= 0)
+        {
+            _recolorStale = true;
+            return ready;
+        }
+        if (!current) _recolorBudget--;
+        // Both roles are normally baked when the line is built (see BuildLine); this is the safety
+        // net for a line that reached the screen before that pass ran.
+        int bucket = current ? 0 : (distance <= 1 ? distance : 2);
+        var baked = BakeLine(render, bucket, current, dpi);
+        if (current) render.BakedCurrent = baked; else render.BakedPlain = baked;
+        return baked;
+    }
+
+    /// <summary>
+    /// 文字颜色变了。几何不用重建（颜色不进 BuildLine），but the cached line images have the colour
+    /// baked into their pixels, so they all have to be rasterised again. Immediate for the reading line,
+    /// two neighbours per frame after that, with a repaint kept queued until nothing stale is drawn.
+    /// </summary>
+    private void QueueRecolor()
+    {
+        _recolorPending = true;
+        _recolorBudget = 2;
+        InvalidateVisual();
+    }
+
+    private int _recolorBudget;
+    private bool _recolorPending;
+    private bool _recolorStale;
+
+    private static BitmapSource BakeImage(DrawingVisual visual, Rect rect, double scale)
+    {
+        var bitmap = new RenderTargetBitmap(
+            Math.Max(1, (int)Math.Ceiling(rect.Width * scale)),
+            Math.Max(1, (int)Math.Ceiling(rect.Height * scale)), 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(visual);
+        bitmap.Freeze();
+        return bitmap;
+    }
+
+    private BakedText? BakeLine(LineRender render, int distance, bool current, double scale)
+    {
+        var baseGeometry = render.WarpedInk ?? render.Ink;
+        // The sung image has to live in the SAME space as the base image: the karaoke clips are
+        // warped quads, so baking the unwarped ink here made the bright copy land offset from the
+        // dim one (visible as doubled text on the reading line).
+        var sungGeometry = baseGeometry;
+        var box = baseGeometry.Bounds;
+        if (box.IsEmpty || box.Width < 0.5 || box.Height < 0.5) return null;
+        var sungBox = sungGeometry.Bounds;
+        if (!sungBox.IsEmpty) box = Rect.Union(box, sungBox);
+        if (_translation && render.Translation is { } tg && !tg.Bounds.IsEmpty)
+            box = Rect.Union(box, tg.Bounds);
+
+        // Padding covers the drop shadow (2.5 px down), the nine-tap neighbour smear, and antialiasing
+        // slack, so nothing is ever clipped at the image border.
+        double smear = current ? 0 : SoftRadius(distance);
+        double pad = Math.Max(6.0, _fontSize * 0.35) + smear;
+        if (!(scale > 0.1)) scale = 1;
+        // Snap the image box to whole device pixels and derive its DIP size from the pixel size, so
+        // the blit is exactly 1:1 and the text stays as crisp as the vector original.
+        int pixelWidth = Math.Max(1, (int)Math.Round((box.Width + pad * 2) * scale));
+        int pixelHeight = Math.Max(1, (int)Math.Round((box.Height + pad * 2) * scale));
+        var rect = new Rect(Math.Round((box.X - pad) * scale) / scale, Math.Round((box.Y - pad) * scale) / scale,
+                            pixelWidth / scale, pixelHeight / scale);
+
+        var visual = new DrawingVisual();
+        using (var dc = visual.RenderOpen())
+        {
+            dc.PushTransform(new ScaleTransform(scale, scale));
+            dc.PushTransform(new TranslateTransform(-rect.X, -rect.Y));
+            if (current)
+            {
+                var shadowBrush = new SolidColorBrush(Color.FromArgb(0x62, 0, 0, 0));
+                shadowBrush.Freeze();
+                dc.PushTransform(new TranslateTransform(0, 2.5));
+                dc.DrawGeometry(shadowBrush, null, baseGeometry);
+                dc.Pop();
+
+                var dim = _textColor;
+                dim.A = (byte)(0.30 * 255);
+                var dimBrush = new SolidColorBrush(dim);
+                dimBrush.Freeze();
+                dc.DrawGeometry(dimBrush, null, baseGeometry);
+
+                if (_translation && render.Translation is { } trans)
+                {
+                    var transBrush = TranslationBrush();
+                    var transInk = _perspective && render.Plane.Camera > 0
+                        ? render.Plane.Warp(trans, render.Baseline) ?? trans
+                        : trans;
+                    dc.DrawGeometry(transBrush, null, transInk);
+                }
+            }
+            else
+            {
+                var ink = _textColor;
+                ink.A = 255;
+                var brush = new SolidColorBrush(ink);
+                brush.Freeze();
+                if (smear < 0.35)
+                {
+                    dc.DrawGeometry(brush, null, baseGeometry);
+                }
+                else
+                {
+                    var soft = new SolidColorBrush(Color.FromArgb((byte)(0.42 * 255), ink.R, ink.G, ink.B));
+                    soft.Freeze();
+                    for (int dy = -1; dy <= 1; dy++)
+                    for (int dx = -1; dx <= 1; dx++)
+                    {
+                        if (dx == 0 && dy == 0) continue;
+                        dc.PushTransform(new TranslateTransform(dx * smear, dy * smear));
+                        dc.DrawGeometry(soft, null, baseGeometry);
+                        dc.Pop();
+                    }
+                    dc.DrawGeometry(brush, null, baseGeometry);
+                }
+            }
+            dc.Pop();
+            dc.Pop();
+        }
+        var baseImage = BakeImage(visual, rect, scale);
+
+        BitmapSource? sungImage = null;
+        if (current)
+        {
+            var sungVisual = new DrawingVisual();
+            using (var dc = sungVisual.RenderOpen())
+            {
+                dc.PushTransform(new ScaleTransform(scale, scale));
+                dc.PushTransform(new TranslateTransform(-rect.X, -rect.Y));
+                var ink = _textColor;
+                ink.A = 255;
+                var brush = new SolidColorBrush(ink);
+                brush.Freeze();
+                dc.DrawGeometry(brush, null, sungGeometry);
+                dc.Pop();
+                dc.Pop();
+            }
+            sungImage = BakeImage(sungVisual, rect, scale);
+
+            // Per-word ink baked separately: the karaoke fill keeps its exact per-word clips, it just
+            // blits a small image instead of filling that word's glyph outlines again every frame.
+            foreach (var parts in render.WordSegments)
+            {
+                foreach (var part in parts) EnsurePartBaked(part, scale);
+            }
+        }
+
+        return new BakedText
+        {
+            Base = baseImage,
+            Sung = sungImage,
+            Rect = rect,
+            Scale = scale,
+            Distance = distance,
+            Current = current,
+            Color = _textColor,
+        };
+    }
+
+    /// <summary>Draws the baked line. The caller already pushed the row transform, so the image lands
+    /// exactly where the geometry used to.</summary>
+    /// <summary>Rasterises one word fragment at device scale (~60×70 px). Idempotent and lazy: the
+    /// reading-line bake is prepared a frame early, before a cue has any word segments, so the segments
+    /// have to carry their own image instead of borrowing one from that bake.</summary>
+    private WordSegment EnsurePartBaked(WordSegment part, double scale)
+    {
+        if (part.Ink == null) return part;
+        if (!(scale > 0.1)) scale = 1;
+        if (part.Baked != null && Math.Abs(part.BakedScale - scale) < 0.02 &&
+            (part.BakedColor == _textColor || !RecolorOnTextColorChange)) return part;
+
+        var partBox = part.Ink.Bounds;
+        if (partBox.IsEmpty || partBox.Width < 0.3 || partBox.Height < 0.3) return part;
+        // Same pixel-grid snapping as BakeLine: a fractional blit destination would resample the image.
+        int pixelWidth = Math.Max(1, (int)Math.Round((partBox.Width + 4) * scale));
+        int pixelHeight = Math.Max(1, (int)Math.Round((partBox.Height + 4) * scale));
+        var partRect = new Rect(Math.Round((partBox.X - 2) * scale) / scale, Math.Round((partBox.Y - 2) * scale) / scale,
+                                pixelWidth / scale, pixelHeight / scale);
+        var partVisual = new DrawingVisual();
+        using (var pdc = partVisual.RenderOpen())
+        {
+            pdc.PushTransform(new ScaleTransform(scale, scale));
+            pdc.PushTransform(new TranslateTransform(-partRect.X, -partRect.Y));
+            var partInk = _textColor;
+            partInk.A = 255;
+            var partBrush = new SolidColorBrush(partInk);
+            partBrush.Freeze();
+            pdc.DrawGeometry(partBrush, null, part.Ink);
+            pdc.Pop();
+            pdc.Pop();
+        }
+        part.Baked = BakeImage(partVisual, partRect, scale);
+        part.BakedRect = partRect;
+        part.BakedScale = scale;
+        part.BakedColor = _textColor;
+        return part;
+    }
+
+    private bool DrawBaked(DrawingContext dc, LineRender render, double alpha, int distance, bool current)
+    {
+        var baked = EnsureBaked(render, distance, current);
+        if (baked == null) return false;
+        bool fade = alpha < 0.995;
+        if (fade) dc.PushOpacity(Math.Clamp(alpha, 0, 1));
+        dc.DrawImage(baked.Base, baked.Rect);
+        if (current && baked.Sung != null) DrawSungParts(dc, render, baked);
+        if (fade) dc.Pop();
+        return true;
+    }
+
+    /// <summary>Karaoke fill as a clip over the baked ink: one image draw per word fragment instead of
+    /// one glyph-outline fill per word fragment.</summary>
+    private void DrawSungParts(DrawingContext dc, LineRender render, BakedText baked)
+    {
+        var words = render.Line.Words;
+        if (words.Count == 0)
+        {
+            dc.DrawImage(baked.Sung!, baked.Rect);
+            return;
+        }
+        for (int i = 0; i < words.Count && i < render.WordSegments.Count; i++)
+        {
+            var word = words[i];
+            float p = LyricTiming.WordProgress(word, _positionMs);
+            if (p <= 0) continue;
+            var parts = render.WordSegments[i];
+            if (parts.Count == 0) continue;
+            double total = 0;
+            foreach (var part in parts) total += part.Box.Width;
+            double remaining = total * p;
+            if (remaining <= 0.2) continue;
+            foreach (var part in parts)
+            {
+                double w = Math.Min(part.Box.Width, remaining);
+                if (w <= 0) break;
+                if (part.Ink == null)
+                {
+                    remaining -= part.Box.Width;
+                    continue;
+                }
+                // Safety net for a segment whose image was not baked yet (first frame of a cue that a
+                // seek made current). One small tile, not the whole line.
+                EnsurePartBaked(part, baked.Scale);
+                if (part.Baked == null)
+                {
+                    remaining -= part.Box.Width;
+                    continue;
+                }
+                if (w < part.Box.Width - 0.5)
+                {
+                    double pad = _fontSize * 0.35;
+                    var cut = new Rect(part.Box.X, part.Box.Y - pad, w, part.Box.Height + pad * 2);
+                    Geometry clip = render.WarpedInk != null
+                        ? render.Plane.Quad(cut, render.Baseline)
+                        : new RectangleGeometry(cut);
+                    dc.PushClip(clip);
+                    dc.DrawImage(part.Baked, part.BakedRect);
+                    dc.Pop();
+                }
+                else
+                {
+                    dc.DrawImage(part.Baked, part.BakedRect);
+                }
+                remaining -= part.Box.Width;
+            }
+        }
+    }
+
+    /// <summary>QA switch: 1 = the old behaviour, where a row flipped from the reading-line bake to the
+    /// neighbour bake in a single frame (that flip is the flash this fix removes).</summary>
+    private static readonly bool NoMorphFade = Environment.GetEnvironmentVariable("LYRIC_NOFADE") == "1";
+
+    /// <summary>Draws one row with the look its role asks for, cross-fading the two bakes while a cue
+    /// change moves the rows past each other.</summary>
+    private void DrawRow(DrawingContext dc, LineRender render, int index, double alpha, int distance)
+    {
+        if (NoMorphFade)
+        {
+            if (index == _current) DrawCurrentLine(dc, render, alpha);
+            else DrawPlainLine(dc, render, alpha, distance);
+            return;
+        }
+        bool morphing = _morphing && _previous >= 0 && _previous != _current;
+        double neighbour;
+        if (!morphing) neighbour = index == _current ? 0 : 1;
+        else if (index == _previous) neighbour = MorphBlend;
+        else if (index == _current) neighbour = 1 - MorphBlend;
+        else neighbour = 1;
+
+        if (neighbour <= 0.002)
+        {
+            DrawCurrentLine(dc, render, alpha);
+            return;
+        }
+        if (neighbour >= 0.998)
+        {
+            DrawPlainLine(dc, render, alpha, distance);
+            return;
+        }
+        // Both images land on the same pixels, so the sum is the ordinary layer blend of the two looks.
+        dc.PushOpacity(1 - neighbour);
+        DrawCurrentLine(dc, render, alpha);
+        dc.Pop();
+        dc.PushOpacity(neighbour);
+        DrawPlainLine(dc, render, alpha, distance);
+        dc.Pop();
+    }
+
     private void DrawPlainLine(DrawingContext dc, LineRender render, double alpha, int distance = 99)
     {
+        if (UseBakedText && DrawBaked(dc, render, alpha, distance, current: false)) return;
         var c = _textColor;
         c.A = (byte)Math.Clamp(alpha * 255, 0, 255);
         var brush = new SolidColorBrush(c);
@@ -825,19 +1365,9 @@ public sealed class LyricStackView : FrameworkElement
 
     private void DrawCurrentLine(DrawingContext dc, LineRender render, double alpha)
     {
-        byte mainAlpha = (byte)Math.Clamp(255 * Math.Min(1, alpha), 0, 255);
         // A jump (seek) can make a line current before its karaoke ink was built; do it once here.
-        if (render.WordSegments.Count == 0 && render.Line.Words.Count > 0) BuildWordPartsFor(render);
-
-        // Soft drop shadow so the lyric stays legible over a bright wallpaper.
-        byte shadowAlpha = (byte)(0x62 * Math.Min(1, alpha));
-        var shadow = new SolidColorBrush(Color.FromArgb(shadowAlpha, 0, 0, 0));
-        shadow.Freeze();
-        var inkGeometry = render.WarpedInk ?? render.Ink;
-        dc.PushTransform(new TranslateTransform(0, 2.5));
-        dc.DrawGeometry(shadow, null, inkGeometry);
-        dc.Pop();
-
+        // This has to run before the baked path too: the per-word bakes are built from these segments.
+        if (render.WordSegments.Count == 0 && render.Line.Words.Count > 0) BuildWordPartsFor(render, 3);
         if (_glowEnabled && _glowStrength > 0.001)
         {
             // Word-timed cues glow per word; plain LRC files carry no word timing at all, so those
@@ -846,6 +1376,17 @@ public sealed class LyricStackView : FrameworkElement
             if (render.Line.Words.Count == 0) DrawLineGlow(dc, render, alpha);
             else if (render.Halos.Length > 0) DrawGlow(dc, render);
         }
+        if (UseBakedText && DrawBaked(dc, render, alpha, 0, current: true)) return;
+
+        byte mainAlpha = (byte)Math.Clamp(255 * Math.Min(1, alpha), 0, 255);
+        // Soft drop shadow so the lyric stays legible over a bright wallpaper.
+        byte shadowAlpha = (byte)(0x62 * Math.Min(1, alpha));
+        var shadow = new SolidColorBrush(Color.FromArgb(shadowAlpha, 0, 0, 0));
+        shadow.Freeze();
+        var inkGeometry = render.WarpedInk ?? render.Ink;
+        dc.PushTransform(new TranslateTransform(0, 2.5));
+        dc.DrawGeometry(shadow, null, inkGeometry);
+        dc.Pop();
 
         var dim = _textColor;
         dim.A = (byte)(0.30 * mainAlpha);
@@ -909,8 +1450,7 @@ public sealed class LyricStackView : FrameworkElement
 
         if (_translation && render.Translation is { } trans)
         {
-            var brush = new SolidColorBrush(Color.FromArgb((byte)(0xB4 * alpha / 1.0), 0xFF, 0xFF, 0xFF));
-            brush.Freeze();
+            var brush = TranslationBrush((byte)(0xB4 * alpha / 1.0));
             var transInk = _perspective && render.Plane.Camera > 0
                 ? render.Plane.Warp(trans, render.Baseline) ?? trans
                 : trans;
@@ -918,10 +1458,27 @@ public sealed class LyricStackView : FrameworkElement
         }
     }
 
+    /// <summary>The translation line follows the lyric colour at 70% instead of being hard-coded
+    /// white — white is what it used to be, so the default look does not change, but a coloured text
+    /// no longer leaves a white line in the middle of it.</summary>
+    private SolidColorBrush TranslationBrush(byte alpha = 0xB4)
+    {
+        var colour = _textColor;
+        colour.A = alpha;
+        var brush = new SolidColorBrush(colour);
+        brush.Freeze();
+        return brush;
+    }
+
     /// <summary>Bloom for a cue that has no per-word timing: one halo behind the whole line.</summary>
     private void DrawLineGlow(DrawingContext dc, LineRender render, double lineAlpha)
     {
-        render.LineHalo ??= BuildLineHalo(render);
+        // 整行光晕（没有逐字时间的纯 LRC）是又大又糊的一张蒙版，半径变了才重糊一次，别每帧都做。
+        if (render.LineHalo == null || Math.Abs(render.LineHaloRadius - _glowRadius) > 0.5)
+        {
+            render.LineHalo = BuildLineHalo(render);
+            render.LineHaloRadius = _glowRadius;
+        }
         if (render.LineHalo is not { } halo) return;
         double alpha = Math.Clamp(0.7 * _glowStrength, 0, 1) * Math.Clamp(lineAlpha, 0, 1);
         if (alpha <= 0.002) return;
@@ -966,6 +1523,48 @@ public sealed class LyricStackView : FrameworkElement
         DebugRecoloredHalos = count;
     }
 
+    /// <summary>Marks every cached halo as needing a re-blur at the current radius. The masks are rebuilt
+    /// a few words per frame by <see cref="RefreshGlowHalos"/>, so dragging the glow radius keeps the
+    /// text and the karaoke fill exactly where they were.</summary>
+    private void InvalidateGlowHalos()
+    {
+        foreach (var render in _cache.Values) render.HaloRadius = Array.Empty<double>();
+        foreach (var render in _stale.Values) render.HaloRadius = Array.Empty<double>();
+        InvalidateVisual();
+    }
+
+    /// <summary>A word halo is a blurred mask: only its radius and colour are baked in, so a radius change
+    /// re-blurs a handful of words per frame instead of rebuilding the line. Building all thirteen at
+    /// once is ~20 ms, which is why the radius used to ride on the whole-line rebuild — and that rebuild
+    /// is what blanked the glow and collapsed the karaoke for a frame or two while the slider moved.</summary>
+    private void RefreshGlowHalos(int budget)
+    {
+        if (!_glowEnabled || _glowStrength <= 0.001) return;
+        if (!_cache.TryGetValue(_current, out var render)) return;
+        var shapes = render.HaloShapes;
+        if (shapes.Length == 0) return;
+        if (render.HaloRadius.Length != shapes.Length)
+        {
+            render.HaloRadius = new double[shapes.Length];
+            for (int i = 0; i < render.HaloRadius.Length; i++) render.HaloRadius[i] = double.NaN;
+        }
+        int done = 0;
+        for (int i = 0; i < shapes.Length && done < budget; i++)
+        {
+            if (Math.Abs(render.HaloRadius[i] - _glowRadius) < 0.5) continue;
+            if (shapes[i] is not { } shape)
+            {
+                render.HaloRadius[i] = _glowRadius;
+                continue;
+            }
+            try { render.Halos[i] = GlowHalo.Build(shape, render.HaloBounds[i], _glowRadius, _glowColor); }
+            catch { }
+            render.HaloRadius[i] = _glowRadius;
+            done++;
+        }
+        if (done > 0) InvalidateVisual();
+    }
+
     private long RecolorLine(LineRender render)
     {
         long count = 0;
@@ -1008,8 +1607,11 @@ public sealed class LyricStackView : FrameworkElement
     private Typeface TypefaceFor(bool medium)
     {
         if (_typefaces.TryGetValue(medium, out var tf)) return tf;
+        // 正文字重用 Normal, 不用 Medium: 文楷只有一个 Medium 字面 (WPF 挑最接近的 -> 原样),
+        // 但黑体系统字体一般有真正的 Medium 面, 于是播放页笔画比桌面歌词粗一档. 用户报的
+        // 「字体笔画粗」就是这个, 不是字号大.
         tf = new Typeface(FontResolver.Resolve(_fontName), FontStyles.Normal,
-            medium ? FontWeights.Medium : FontWeights.Normal, FontStretches.Normal);
+            FontWeights.Normal, FontStretches.Normal);
         _typefaces[medium] = tf;
         return tf;
     }
@@ -1017,10 +1619,10 @@ public sealed class LyricStackView : FrameworkElement
     private LineRender? GetLine(int index)
     {
         if (_doc == null || index < 0 || index >= _doc.Lines.Count) return null;
-        if (_cache.TryGetValue(index, out var cached)) return cached;
-        // Mid-rebuild: keep drawing the previous geometry until the whole visible window has been
-        // rebuilt, so a settings change never shows half the column at the old size and half at the new.
+        // 重建期间整列只画上一份几何：以前先查 _cache，于是重建到哪一行、哪一行就先换成新姿态，
+        // 拖 3D 倾斜/交点的时候整列一半旧一半新，看着就是文字在闪。等整窗建完再一次性换。
         if (_rebuilding && _stale.TryGetValue(index, out var stale)) return stale;
+        if (_cache.TryGetValue(index, out var cached)) return cached;
         return BuildLine(index);
     }
 
@@ -1034,12 +1636,22 @@ public sealed class LyricStackView : FrameworkElement
     /// can be spread over several frames instead of one long stall.</summary>
     private void InvalidateCache()
     {
+        // 重建期间又要重建（拖 3D 倾斜/交点时每帧都在改）：让它先把这一轮跑完，否则每帧都从零开始，
+        // 整列永远换不上新姿态（旧代码是每帧丢一次 → 一半旧一半新 → 文字闪）。
+        if (_rebuilding)
+        {
+            _rebuildAgain = true;
+            return;
+        }
         // Merge, do not replace: a drag invalidates again before the previous rebuild finished, and
         // dropping the older placeholders here would force a full rebuild on the next frame.
         foreach (var kv in _cache) _stale[kv.Key] = kv.Value;
         _cache.Clear();
         _rebuilding = _stale.Count > 0;
+        _rebuildAgain = false;
     }
+
+    private bool _rebuildAgain;
 
     private LineRender? BuildLine(int index)
     {
@@ -1106,7 +1718,7 @@ public sealed class LyricStackView : FrameworkElement
         // Per-word karaoke ink is only ever drawn for the cue that is being sung (and its immediate
         // neighbours, which become current next). Building it for every cached line — a boolean
         // geometry intersection per word on a warped path — was most of a 20 ms line rebuild.
-        if (!_rebuilding && line.Words.Count > 0 && Math.Abs(index - _current) <= 1) BuildWordParts(render, ft);
+        if (!_rebuilding && line.Words.Count > 0 && index == _current) BuildWordParts(render, ft);
 
         if (_translation && line.Translation.Length > 0)
         {
@@ -1124,43 +1736,96 @@ public sealed class LyricStackView : FrameworkElement
         }
 
         _cache[index] = render;
+        // Only the plain image is baked here; the reading-line image is baked one per frame by the
+        // pending pass in DrawCore. Both in one frame was still an 8-12 ms stall on the frame that
+        // built a new line, which is exactly when a cue change happens.
+        try
+        {
+            double dpiBake = VisualTreeHelper.GetDpi(this).DpiScaleX;
+            if (!(dpiBake > 0.1)) dpiBake = 1.0;
+            render.BakedPlain = BakeLine(render, 2, false, dpiBake);
+        }
+        catch { }
         return render;
     }
 
     /// <summary>Builds the per-word karaoke ink and the glow halos for one line. Only ever needed for
     /// the cue being sung, so it is done on demand instead of for every cached line.</summary>
-    private void BuildWordPartsFor(LineRender render)
+    private void BuildWordPartsFor(LineRender render, int budget = int.MaxValue)
     {
         if (render.Formatted == null) return;
-        BuildWordParts(render, render.Formatted);
+        BuildWordParts(render, render.Formatted, budget);
     }
 
-    private void BuildWordParts(LineRender render, FormattedText ft)
+    /// <summary>How many words of karaoke ink one frame may add. A whole cue costs ~20 ms there (one
+    /// layout query per character plus a boolean intersection per word), and it used to run on the
+    /// single frame where the cue became current — the switch visibly hitched instead of sliding. Two
+    /// words a frame keeps every frame under ~2 ms and still finishes a cue seconds before it is sung.</summary>
+    private const int WordPartsPerFrame = 2;
+
+    /// <summary>Spends this frame's word budget on the reading line, then on the cue after it — the one
+    /// that becomes current next, and normally has seconds to spare.</summary>
+    private void BuildWordPartsAhead()
     {
-        if (render.WordSegments.Count > 0) return;
+        if (_doc == null) return;
+        if (ExtendWordParts(_current)) return;
+        ExtendWordParts(_current + 1);
+    }
+
+    private bool ExtendWordParts(int index)
+    {
+        if (_doc == null || index < 0 || index >= _doc.Lines.Count) return false;
+        if (!_cache.TryGetValue(index, out var render)) return false;
+        if (render.Formatted == null) return false;
+        if (render.Line.Words.Count == 0) return false;
+        if (render.WordBuilt >= render.Line.Words.Count) return false;
+        BuildWordParts(render, render.Formatted, WordPartsPerFrame);
+        return true;
+    }
+
+    private void BuildWordParts(LineRender render, FormattedText ft, int budget = int.MaxValue)
+    {
         var line = render.Line;
         var words = line.Words;
+        if (words.Count == 0) return;
 
         // A word can straddle a wrap; keep one rect per text row so the karaoke edge never
         // paints a tall band across both rows.
-        var boxes = new List<List<Rect>>(words.Count);
-        for (int i = 0; i < words.Count; i++)
+        if (render.WordSegments.Count == 0)
         {
-            var w = words[i];
-            int start = Math.Clamp(w.StartOffset, 0, line.Text.Length);
-            int end = Math.Clamp(w.EndOffset, start, line.Text.Length);
-            boxes.Add(RowRects(ft, start, end, _fontSize));
+            for (int i = 0; i < words.Count; i++) render.WordSegments.Add(new List<WordSegment>(0));
+            render.WordRects.Clear();
+            for (int i = 0; i < words.Count; i++) render.WordRects.Add(new List<Rect>());
+            render.Halos = _glowEnabled && _glowStrength > 0.001
+                ? new GlowHalo?[words.Count]
+                : Array.Empty<GlowHalo?>();
+            if (render.Halos.Length > 0)
+            {
+                render.HaloShapes = new Geometry?[words.Count];
+                render.HaloBounds = new Rect[words.Count];
+                render.HaloRadius = new double[words.Count];
+                for (int i = 0; i < render.HaloRadius.Length; i++) render.HaloRadius[i] = double.NaN;
+            }
         }
-        render.WordRects = boxes;
 
         // Keep only the ink that belongs to each word/row, so the karaoke cut can never paint a
         // neighbouring glyph.
         double margin = _fontSize * 0.30;
-        var segments = new List<List<WordSegment>>(boxes.Count);
         var sourceInk = render.WarpedInk ?? render.Ink;
-        foreach (var rects in boxes)
+        double dpi = VisualTreeHelper.GetDpi(this).PixelsPerDip;
+        if (!(dpi > 0.1)) dpi = 1.0;
+
+        int remaining = words.Count - render.WordBuilt;
+        int end = budget >= remaining ? words.Count : render.WordBuilt + Math.Max(1, budget);
+        for (int i = render.WordBuilt; i < end; i++)
         {
-            var parts = new List<WordSegment>(rects.Count);
+            var w = words[i];
+            int start = Math.Clamp(w.StartOffset, 0, line.Text.Length);
+            int stop = Math.Clamp(w.EndOffset, start, line.Text.Length);
+            var rects = RowRects(ft, start, stop, _fontSize);
+            if (i < render.WordRects.Count) render.WordRects[i] = rects;
+
+            var parts = i < render.WordSegments.Count ? render.WordSegments[i] : new List<WordSegment>();
             foreach (var r in rects)
             {
                 var padded = new Rect(r.X, r.Y - margin, r.Width, r.Height + margin * 2);
@@ -1171,62 +1836,66 @@ public sealed class LyricStackView : FrameworkElement
                 {
                     var ink = Geometry.Combine(sourceInk, box, GeometryCombineMode.Intersect, null);
                     ink.Freeze();
-                    parts.Add(new WordSegment { Box = r, Ink = ink });
+                    parts.Add(EnsurePartBaked(new WordSegment { Box = r, Ink = ink }, dpi));
                 }
                 catch
                 {
                     parts.Add(new WordSegment { Box = r, Ink = null });
                 }
             }
-            segments.Add(parts);
-        }
-        render.WordSegments = segments;
 
-        // Halos are needed for the tilted plane too — it used to build them only when the line was
-        // flat, so with 3D 倾斜歌词 on the "歌词辉光" switch did nothing whatsoever.
-        if (_glowEnabled && _glowStrength > 0.001)
-        {
-            render.Halos = new GlowHalo?[words.Count];
-            for (int i = 0; i < boxes.Count; i++)
+            // Halos are needed for the tilted plane too — it used to build them only when the line was
+            // flat, so with 3D 倾斜歌词 on the "歌词辉光" switch did nothing whatsoever.
+            if (i < render.Halos.Length && rects.Count > 0)
             {
-                var rects = boxes[i];
-                if (rects.Count == 0) continue;
                 var union = rects[0];
                 for (int k = 1; k < rects.Count; k++) union.Union(rects[k]);
-                if (union.Width <= 0.3) continue;
-
-                // On the tilted plane the halo is cut from the warped ink with the same quad the
-                // karaoke edge uses, so the bloom follows the tilted glyphs instead of sitting in a
-                // flat rectangle behind them.
-                Geometry shape;
-                Rect bounds;
-                if (render.WarpedInk != null)
+                if (union.Width > 0.3)
                 {
-                    var pad = new Rect(union.X, union.Y - margin, union.Width, union.Height + margin * 2);
-                    var quad = render.Plane.Quad(pad, render.Baseline);
-                    if (quad == null || quad.Bounds.Width <= 0.3) continue;
-                    bounds = quad.Bounds;
-                    shape = Geometry.Combine(sourceInk, quad, GeometryCombineMode.Intersect, null);
+                    // On the tilted plane the halo is cut from the warped ink with the same quad the
+                    // karaoke edge uses, so the bloom follows the tilted glyphs instead of sitting in a
+                    // flat rectangle behind them.
+                    Geometry shape;
+                    Rect bounds;
+                    if (render.WarpedInk != null)
+                    {
+                        var pad = new Rect(union.X, union.Y - margin, union.Width, union.Height + margin * 2);
+                        var quad = render.Plane.Quad(pad, render.Baseline);
+                        if (quad != null && quad.Bounds.Width > 0.3)
+                        {
+                            bounds = quad.Bounds;
+                            shape = Geometry.Combine(sourceInk, quad, GeometryCombineMode.Intersect, null);
+                            try
+                            {
+                                shape.Freeze();
+                                render.HaloShapes[i] = shape;
+                                render.HaloBounds[i] = bounds;
+                                render.Halos[i] = GlowHalo.Build(shape, bounds, _glowRadius, _glowColor);
+                                render.HaloRadius[i] = _glowRadius;
+                            }
+                            catch { }
+                        }
+                    }
+                    else
+                    {
+                        bounds = union;
+                        var geo = new RectangleGeometry(union);
+                        geo.Freeze();
+                        shape = Geometry.Combine(sourceInk, geo, GeometryCombineMode.Intersect, null);
+                        try
+                        {
+                            shape.Freeze();
+                            render.HaloShapes[i] = shape;
+                            render.HaloBounds[i] = bounds;
+                            render.Halos[i] = GlowHalo.Build(shape, bounds, _glowRadius, _glowColor);
+                            render.HaloRadius[i] = _glowRadius;
+                        }
+                        catch { }
+                    }
                 }
-                else
-                {
-                    bounds = union;
-                    var geo = new RectangleGeometry(union);
-                    geo.Freeze();
-                    shape = Geometry.Combine(sourceInk, geo, GeometryCombineMode.Intersect, null);
-                }
-                try
-                {
-                    shape.Freeze();
-                    render.Halos[i] = GlowHalo.Build(shape, bounds, _glowRadius, _glowColor);
-                }
-                catch { }
             }
         }
-        else
-        {
-            render.Halos = Array.Empty<GlowHalo?>();
-        }
+        render.WordBuilt = Math.Max(render.WordBuilt, end);
     }
 
     /// <summary>Character boxes of a range, merged per text row (words may wrap).</summary>
@@ -1279,15 +1948,29 @@ public sealed class LyricStackView : FrameworkElement
         public double ExtraHeight;
         public List<List<Rect>> WordRects = new();
         public List<List<WordSegment>> WordSegments = new();
+        /// <summary>How many words of the cue already have karaoke ink. The segments are built a few
+        /// words per frame (see BuildWordParts), so the list is pre-sized and its tail stays empty.</summary>
+        public int WordBuilt;
         public GlowHalo?[] Halos = Array.Empty<GlowHalo?>();
+        /// <summary>Shape and box each word halo was cut from, kept so a radius change can re-blur the
+        /// masks only instead of rebuilding the line.</summary>
+        public Geometry?[] HaloShapes = Array.Empty<Geometry?>();
+        public Rect[] HaloBounds = Array.Empty<Rect>();
+        /// <summary>Radius each halo mask was baked at (NaN = never built).</summary>
+        public double[] HaloRadius = Array.Empty<double>();
         /// <summary>Whole-line halo for cues without per-word timing (plain LRC): there is nothing to
         /// hang a per-word halo on, so the entire line blooms instead.</summary>
         public GlowHalo? LineHalo;
+        public double LineHaloRadius = double.NaN;
         public Geometry? Translation;
         public double TranslationHeight;
         public Geometry? WarpedInk;
         public LyricPlane Plane;
         public double Baseline;
         public double InkHeight;
+        /// <summary>Per-line pre-rasterised images (see BakeLine). Both roles are baked when the line is
+        /// built, so a cue change never has to rasterise anything.</summary>
+        public BakedText? BakedPlain;
+        public BakedText? BakedCurrent;
     }
 }

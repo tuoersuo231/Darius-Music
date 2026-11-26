@@ -44,7 +44,7 @@ public static class Program
         // is 179 Hz, so the default cap was the reason motion looked like 60 Hz.
         System.Windows.Media.Animation.Timeline.DesiredFrameRateProperty.OverrideMetadata(
             typeof(System.Windows.Media.Animation.Timeline),
-            new FrameworkPropertyMetadata(120));
+            new FrameworkPropertyMetadata(Math.Clamp(NativeMethods.DisplayRefreshHz(), 60, 360)));
         app.Resources.MergedDictionaries.Add(new ResourceDictionary
         {
             Source = new Uri("pack://application:,,,/Theme.xaml", UriKind.Absolute),
@@ -55,6 +55,8 @@ public static class Program
         // QA: force the 3D depth-ratio cap so the before/after of the projection can be compared.
         if (double.TryParse(Arg(args, "--depth"), out var depthRatio) && depthRatio > 0)
             Controls.PerspectiveWarp.MaxDepthRatio = depthRatio;
+        // QA: render the lyric column with the old glyph-outline path for A/B screenshots.
+        if (args.Contains("--nobake")) Controls.LyricStackView.UseBakedText = false;
 
         if (args.Contains("--media-test"))
         {
@@ -208,6 +210,205 @@ public static class Program
                 }
             }
             File.WriteAllLines(Path.Combine(qaDir, "plane.txt"), report);
+            return;
+        }
+        if (args.Contains("--karaoke-qa"))
+        {
+            // 逐字歌词 QA：在给定播放位置把歌词列画成 PNG，并报告读取行每个词的卡拉OK 状态
+            // （时钟判定已开始的词数 / 已建好的词数 / 真正带贴图可以贴的碎片数）。
+            string kqDir = Arg(args, "--karaoke-qa") ?? ".";
+            Directory.CreateDirectory(kqDir);
+            string? kqLrc = Arg(args, "--lrc");
+            var kqDoc = kqLrc != null && File.Exists(kqLrc)
+                ? LrcParser.Parse(File.ReadAllText(kqLrc))
+                : LrcParser.Demo();
+            long kqAt = long.TryParse(Arg(args, "--pos"), out var kqP) ? kqP : 40000;
+            var kqReport = new List<string> { $"src={(kqLrc ?? "<demo>")} lines={kqDoc.Lines.Count} pos={kqAt}" };
+            foreach (double kqSpread in new[] { 0.5, 1.0, 2.0 })
+            {
+            var view = new Controls.LyricStackView { IsHitTestVisible = false, SoftNeighbours = true };
+            var s = settings.Clone();
+            s.FontSize = settings.PlayerFontSize;
+            s.VisibleLines = settings.PlayerVisibleLines;
+            s.CurrentScale = settings.PlayerCurrentScale;
+            s.LineGap = settings.PlayerLineGap;
+            s.Translation = settings.PlayerTranslation;
+            s.GlowEnabled = true;
+            s.GlowStrength = Math.Max(1.0, settings.PlayerGlowStrength);
+            s.GlowSpread = kqSpread;
+            s.TextColor = settings.PlayerTextColor;
+            s.Perspective = true;
+            s.TiltAngle = settings.PlayerTiltAngle;
+            s.VanishingOffset = settings.PlayerVanishingOffset;
+            s.Backdrop = false;
+            s.LineWidth = 931;
+            view.ApplySettings(s, 1.0);
+            view.SetDocument(kqDoc, kqAt);
+            var host = new System.Windows.Controls.Border
+            {
+                Width = 1240, Height = 820,
+                Background = new SolidColorBrush(Color.FromRgb(0x12, 0x16, 0x1E)),
+                Child = view,
+            };
+            host.Measure(new Size(1240, 820));
+            host.Arrange(new Rect(0, 0, 1240, 820));
+            host.UpdateLayout();
+            // 词段平时是分帧建出来的；离屏渲染拿不到几十个真实帧，这里一次性建完再画。
+            view.DebugBuildAllWordParts();
+            view.Snap();
+            app.Dispatcher.Invoke(() => { }, DispatcherPriority.Render);
+            SaveVisual(host, 1240, 820, Path.Combine(kqDir, $"karaoke-s{kqSpread * 100:000}.png"));
+            kqReport.Add($"spread={kqSpread:0.00} {view.DebugKaraoke}");
+            kqReport.Add(view.DebugFont);
+            }
+            File.WriteAllLines(Path.Combine(kqDir, "karaoke.txt"), kqReport);
+            // 3D 倾斜：滑块上的角度和真正画出来的远近比是不是一一对应（以前 >30° 全部饱和）。
+            foreach (double kqTilt in new[] { 20.0, 30.0, 45.0, 60.0, 75.0 })
+            {
+                var tv = new Controls.LyricStackView { IsHitTestVisible = false, SoftNeighbours = true };
+                var ts = settings.Clone();
+                ts.FontSize = settings.PlayerFontSize;
+                ts.VisibleLines = settings.PlayerVisibleLines;
+                ts.CurrentScale = settings.PlayerCurrentScale;
+                ts.LineGap = settings.PlayerLineGap;
+                ts.Translation = settings.PlayerTranslation;
+                ts.GlowEnabled = false;
+                ts.Perspective = true;
+                ts.TiltAngle = -kqTilt;
+                ts.VanishingOffset = settings.PlayerVanishingOffset;
+                ts.Backdrop = false;
+                ts.LineWidth = 931;
+                tv.ApplySettings(ts, 1.0);
+                tv.SetDocument(kqDoc, kqAt);
+                var thost = new System.Windows.Controls.Border
+                {
+                    Width = 1240, Height = 820,
+                    Background = new SolidColorBrush(Color.FromRgb(0x12, 0x16, 0x1E)),
+                    Child = tv,
+                };
+                thost.Measure(new Size(1240, 820));
+                thost.Arrange(new Rect(0, 0, 1240, 820));
+                thost.UpdateLayout();
+                SaveVisual(thost, 1240, 820, Path.Combine(kqDir, $"tilt-{kqTilt:00}.png"));
+                File.AppendAllLines(Path.Combine(kqDir, "karaoke.txt"), new[] { $"tilt=-{kqTilt:0} {tv.DebugPlane}" });
+            }
+            return;
+        }
+        if (args.Contains("--text-color"))
+        {
+            // 文字颜色到底有没有画上去：同一列先用白字渲一帧，再就地改色（几何不动、只该重烘贴图）渲
+            // 一帧，数「红字像素」和白字像素。以前改色只动 _textColor，贴图还是旧颜色的，所以这里是 0。
+            string tcDir = Arg(args, "--text-color") ?? ".";
+            Directory.CreateDirectory(tcDir);
+            string? tcLrc = Arg(args, "--lrc");
+            var tcDoc = tcLrc != null && File.Exists(tcLrc)
+                ? LrcParser.Parse(File.ReadAllText(tcLrc))
+                : LrcParser.Demo();
+            long tcAt = long.TryParse(Arg(args, "--pos"), out var tcP) ? tcP : 40000;
+            string target = (Arg(args, "--c") ?? "FF3B30").TrimStart('#').ToUpperInvariant();
+            var report = new List<string> { $"src={(tcLrc ?? "<demo>")} lines={tcDoc.Lines.Count} pos={tcAt} target=#{target}" };
+
+            var tc = settings.Clone();
+            tc.TextColor = "FFFFFF";
+            tc.GlowEnabled = false;
+            tc.Backdrop = false;
+            tc.FontSize = 30;
+            tc.LineWidth = 931;
+            tc.VisibleLines = 7;
+            tc.Perspective = false;
+            tc.Translation = false;
+
+            var view = new Controls.LyricStackView { IsHitTestVisible = false };
+            view.ApplySettings(tc, 1.0);
+            view.SetDocument(tcDoc, tcAt);
+            var host = new System.Windows.Controls.Border
+            {
+                Width = 1100,
+                Height = 520,
+                Background = new SolidColorBrush(Color.FromRgb(0x12, 0x16, 0x1E)),
+                Child = view,
+            };
+            host.Measure(new Size(1100, 520));
+            host.Arrange(new Rect(0, 0, 1100, 520));
+            host.UpdateLayout();
+            view.DebugBuildAllWordParts();
+            view.Snap();
+
+            RenderTargetBitmap Shot()
+            {
+                app.Dispatcher.Invoke(() => { }, DispatcherPriority.Render);
+                var rtb = new RenderTargetBitmap(1100, 520, 96, 96, PixelFormats.Pbgra32);
+                rtb.Render(host);
+                return rtb;
+            }
+
+            (int white, int red) Count(RenderTargetBitmap rtb)
+            {
+                int w = rtb.PixelWidth, h = rtb.PixelHeight;
+                var px = new byte[w * h * 4];
+                rtb.CopyPixels(px, w * 4, 0);
+                int white = 0, red = 0;
+                for (int i = 0; i < px.Length; i += 4)
+                {
+                    byte b = px[i], g = px[i + 1], r = px[i + 2], a = px[i + 3];
+                    if (a < 40) continue;
+                    if (r > 150 && g < 90 && b < 90) red++;
+                    else if (r > 190 && g > 190 && b > 190) white++;
+                }
+                return (white, red);
+            }
+
+            void Save(RenderTargetBitmap rtb, string name)
+            {
+                var encoder = new PngBitmapEncoder();
+                encoder.Frames.Add(BitmapFrame.Create(rtb));
+                using var fs = File.Create(Path.Combine(tcDir, name));
+                encoder.Save(fs);
+            }
+
+            var first = Shot();
+            Save(first, "text-before.png");
+            var c0 = Count(first);
+            report.Add($"white  white={c0.white} red={c0.red} " + view.DebugKaraoke);
+
+            tc.TextColor = target;
+            var applyClock = System.Diagnostics.Stopwatch.StartNew();
+            view.ApplySettings(tc, 1.0);
+            var second = Shot();
+            applyClock.Stop();
+            Save(second, "text-after-1frame.png");
+            var c1 = Count(second);
+            report.Add($"1 frame after recolour  white={c1.white} red={c1.red} apply={applyClock.Elapsed.TotalMilliseconds:0.0} ms");
+
+            for (int i = 0; i < 6; i++) Shot();
+            var settled = Shot();
+            Save(settled, "text-after.png");
+            var c2 = Count(settled);
+            report.Add($"settled  white={c2.white} red={c2.red}");
+
+            // 40 steps, like the colour square fires while dragging a colour (white → target).
+            var dragClock = System.Diagnostics.Stopwatch.StartNew();
+            double worst = 0;
+            for (int i = 0; i < 40; i++)
+            {
+                double k = i / 39.0;
+                string hex = string.Format("{0:X2}{1:X2}{2:X2}",
+                    (int)(255 + (Convert.ToByte(target.Substring(0, 2), 16) - 255) * k),
+                    (int)(255 + (Convert.ToByte(target.Substring(2, 2), 16) - 255) * k),
+                    (int)(255 + (Convert.ToByte(target.Substring(4, 2), 16) - 255) * k));
+                var step = System.Diagnostics.Stopwatch.StartNew();
+                tc.TextColor = hex;
+                view.ApplySettings(tc, 1.0);
+                app.Dispatcher.Invoke(() => { }, DispatcherPriority.Render);
+                step.Stop();
+                worst = Math.Max(worst, step.Elapsed.TotalMilliseconds);
+            }
+            dragClock.Stop();
+            var dragged = Shot();
+            Save(dragged, "text-drag.png");
+            var c3 = Count(dragged);
+            report.Add($"drag 40 steps  avg={dragClock.Elapsed.TotalMilliseconds / 40:0.0} ms worst={worst:0.0} ms final white={c3.white} red={c3.red}");
+            File.WriteAllLines(Path.Combine(tcDir, "text-color.txt"), report);
             return;
         }
         if (args.Contains("--shot"))
@@ -1640,6 +1841,67 @@ public static class Program
             app.Shutdown();
             return;
         }
+        if (args.Contains("--text-live"))
+        {
+            // 真机复核「文字颜色改不动」：走设置窗口里色盘真正触发的那条路径（Preview → QueueApply →
+            // overlay.ApplySettings），改一次色渲一张图，数字才是用户眼前的效果。
+            string dir = Arg(args, "--text-live") ?? "text-live";
+            Directory.CreateDirectory(dir);
+            settings.Enabled = true;
+            settings.BackdropMode = BackdropMode.Transparent;
+            settings.TextColor = "FFFFFF";
+            settings.GlowEnabled = false;
+            if (args.Contains("--flat")) settings.Perspective = false;
+            var tcController = new PlayerController(settings);
+            tcController.LoadDemo(LrcParser.Demo(), DemoCover());
+            var tcWindow = new DesktopLyricsWindow(tcController, settings);
+            tcWindow.Show();
+            tcWindow.SetDemoPosition(long.TryParse(Arg(args, "--pos"), out var tcLivePos) ? tcLivePos : 23900);
+            app.Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
+
+            var tcSettingsWindow = new SettingsWindow(settings, s => tcWindow.ApplySettings(s));
+            tcSettingsWindow.Show();
+            app.Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
+
+            (int white, int red) Stats(string path)
+            {
+                var frame = new BitmapImage();
+                frame.BeginInit();
+                frame.CacheOption = BitmapCacheOption.OnLoad;
+                frame.UriSource = new Uri(path);
+                frame.EndInit();
+                var converted = new FormatConvertedBitmap(frame, PixelFormats.Bgra32, null, 0);
+                int w = converted.PixelWidth, h = converted.PixelHeight;
+                var px = new byte[w * h * 4];
+                converted.CopyPixels(px, w * 4, 0);
+                int white = 0, red = 0;
+                for (int i = 0; i < px.Length; i += 4)
+                {
+                    byte b = px[i], g = px[i + 1], r = px[i + 2], a = px[i + 3];
+                    if (a < 40) continue;
+                    if (r > 150 && g < 90 && b < 90) red++;
+                    else if (r > 190 && g > 190 && b > 190) white++;
+                }
+                return (white, red);
+            }
+
+            var tcReport = new List<string> { $"src=demo pos={(Arg(args, "--pos") ?? "23900")}" };
+            foreach (var hex in new[] { "FFFFFF", "FF3B30", "4C8DFF" })
+            {
+                tcSettingsWindow.DebugPreviewTextColor(hex);
+                app.Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
+                Thread.Sleep(260);
+                var file = Path.Combine(dir, $"text-{hex}.png");
+                tcWindow.RenderPreview(file);
+                tcWindow.CaptureScreen(Path.Combine(dir, $"desktop-{hex}.png"));
+                var st = Stats(file);
+                tcReport.Add($"preview=#{hex} settings.TextColor={settings.TextColor} white={st.white} red={st.red}");
+            }
+            File.WriteAllLines(Path.Combine(dir, "text-live.txt"), tcReport);
+            tcSettingsWindow.Close();
+            tcWindow.Close();
+            return;
+        }
         if (args.Contains("--glow-live"))
         {
             // 用户报「歌词辉光开与关没有区别」：这里真的去设置窗口里拨那个开关，并让桌面歌词按
@@ -1895,8 +2157,74 @@ public static class Program
             RunNowPlaying(app, args, settings);
             return;
         }
-        if (args.Contains("--player-glow"))
+        if (args.Contains("--cue-perf"))
         {
+            RunCuePerf(app, args, settings);
+            return;
+        }
+        if (args.Contains("--cue-film"))
+        {
+            RunCueFilm(app, args, settings);
+            return;
+        }
+        if (args.Contains("--glow-drag"))
+        {
+            // QA: 拖「辉光范围」。滑条每帧改的是 PlayerGlowSpread → _glowRadius；以前它算几何变化，
+            // 每步都丢掉整列几何，朗读行会掉回没有逐字墨水的渲染（只剩两三个亮词、光晕消失）。
+            // 这里扫一遍范围，记录每一步的逐字状态和骨架帧耗时。
+            string gdDir = Arg(args, "--glow-drag") ?? ".";
+            Directory.CreateDirectory(gdDir);
+            settings.Enabled = false;
+            var gdController = new PlayerController(settings);
+            string? gdLrc = Arg(args, "--lrc");
+            var gdDoc = gdLrc != null && File.Exists(gdLrc)
+                ? LrcParser.LoadFor(gdLrc) ?? LrcParser.Demo()
+                : LrcParser.Demo();
+            gdController.LoadDemo(gdDoc, DemoCover());
+            var gdView = new NowPlayingView(gdController, settings);
+            var gdWindow = new Window
+            {
+                Title = "QA · 辉光范围拖动",
+                Width = 1240,
+                Height = 820,
+                Background = Brushes.Black,
+                Content = gdView,
+                WindowStartupLocation = WindowStartupLocation.CenterScreen,
+            };
+            gdWindow.Show();
+            app.Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
+            for (int i = 0; i < 10; i++) Pump(app, 50);
+
+            settings.PlayerGlow = true;
+            if (settings.PlayerGlowStrength < 0.2) settings.PlayerGlowStrength = 1.0;   // QA profile may ship glow off
+            long gdPos = long.TryParse(Arg(args, "--pos"), out var gdP) ? gdP : 40000;
+            gdView.RefreshFromSettings();
+            gdView.DebugPinPosition(gdPos);
+            gdView.DebugBuildAllWordParts();
+            for (int i = 0; i < 6; i++) Pump(app, 50);
+
+            var gdLines = new List<string> { $"pos={gdPos} start={gdView.DebugKaraoke}" };
+            double gdOriginal = settings.PlayerGlowSpread;
+            for (int i = 0; i <= 24; i++)
+            {
+                settings.PlayerGlowSpread = 0.5 + i * (1.5 / 24.0);
+                var swStep = System.Diagnostics.Stopwatch.StartNew();
+                gdView.RefreshFromSettings();
+                Pump(app, 36);
+                swStep.Stop();
+                gdLines.Add($"step={i:00} spread={settings.PlayerGlowSpread:0.00} {gdView.DebugGlowState} " +
+                            $"{gdView.DebugKaraoke} 2frames={swStep.Elapsed.TotalMilliseconds:0.0}ms");
+                if (i is 0 or 8 or 16 or 24)
+                    Save(gdWindow, Path.Combine(gdDir, $"glow-{settings.PlayerGlowSpread * 100:000}.png"));
+            }
+            settings.PlayerGlowSpread = gdOriginal;
+            gdView.RefreshFromSettings();
+            File.WriteAllLines(Path.Combine(gdDir, "glow-drag.txt"), gdLines);
+            gdWindow.Close();
+            app.Shutdown();
+            return;
+        }
+        if (args.Contains("--player-glow"))        {
             RunPlayerGlow(app, args, settings);
             return;
         }
@@ -2502,6 +2830,117 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
     /// <summary>QA for the now-playing page: opens it twice, portrait and wide, with the audio muted.</summary>
     /// <summary>QA for the full-screen page's own glow rows: the ⋯ sheet must offer 强度/范围/颜色,
     /// and changing range or colour must reach the pixels the page paints.</summary>
+    /// <summary>QA: 换行期间的帧间隔（不抓图，避免 RTB 干扰）。每段先静置到边界前 500 ms，再跨过去，
+    /// 记录 700 ms 内每个合成帧的时间戳，输出 worst/over9 —— 卡顿会在这里露出来。</summary>
+    private static void RunCuePerf(Application app, string[] args, AppSettings settings)
+    {
+        string dir = Arg(args, "--cue-perf") ?? "cueperf";
+        Directory.CreateDirectory(dir);
+        settings.Enabled = false;
+        var controller = new PlayerController(settings);
+        string? lrcPath = Arg(args, "--lrc");
+        var doc = lrcPath != null && File.Exists(lrcPath) ? LrcParser.LoadFor(lrcPath) ?? LrcParser.Demo() : LrcParser.Demo();
+        controller.LoadDemo(doc, DemoCover());
+        var view = new NowPlayingView(controller, settings);
+        var window = new Window
+        {
+            Title = "QA · 换行帧率",
+            Width = 1240,
+            Height = 820,
+            Background = Brushes.Black,
+            Content = view,
+            WindowStartupLocation = WindowStartupLocation.CenterScreen,
+        };
+        window.Show();
+        app.Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
+        for (int i = 0; i < 10; i++) Pump(app, 50);
+
+        var lines = new List<string>();
+        int startCue = int.TryParse(Arg(args, "--cue"), out var ci) ? ci : 2;
+        for (int n = 0; n < 5; n++)
+        {
+            int cue = Math.Min(startCue + n, doc.Lines.Count - 1);
+            if (cue <= 0) continue;
+            long cueMs = doc.Lines[cue].StartMs;
+            view.DebugPinPosition(cueMs - 500);
+            for (int i = 0; i < 8; i++) Pump(app, 40);
+
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var stamps = new List<double>();
+            System.EventHandler onRender = (_, _) => stamps.Add(clock.Elapsed.TotalMilliseconds);
+            System.Windows.Media.CompositionTarget.Rendering += onRender;
+            view.DebugPinPositionAnimated(cueMs + 10);
+            PumpFrames(700);
+            System.Windows.Media.CompositionTarget.Rendering -= onRender;
+
+            double worst = 0, total = 0;
+            int over9 = 0, over20 = 0;
+            for (int k = 1; k < stamps.Count; k++)
+            {
+                double d = stamps[k] - stamps[k - 1];
+                total += d;
+                if (d > worst) worst = d;
+                if (d > 9) over9++;
+                if (d > 20) over20++;
+            }
+            double avg = stamps.Count > 1 ? total / (stamps.Count - 1) : 0;
+            lines.Add($"cue {cue} @{cueMs}ms frames={stamps.Count} avg={avg:0.0}ms worst={worst:0.0}ms over9={over9} over20={over20}");
+        }
+        File.WriteAllLines(Path.Combine(dir, "perf.txt"), lines);
+        window.Close();
+        app.Shutdown();
+    }
+
+    /// <summary>QA: 换行动画逐帧抓图。定位到某条歌词开始前 400 ms，然后跨过边界每 38 ms 拍一张，
+    /// 输出 f00..f09.png + film.txt，用来判断「滑+放大」的手感而不是靠想象。</summary>
+    private static void RunCueFilm(Application app, string[] args, AppSettings settings)
+    {
+        string dir = Arg(args, "--cue-film") ?? "cuefilm";
+        Directory.CreateDirectory(dir);
+        settings.Enabled = false;
+        var controller = new PlayerController(settings);
+        string? lrcPath = Arg(args, "--lrc");
+        var doc = lrcPath != null && File.Exists(lrcPath) ? LrcParser.LoadFor(lrcPath) ?? LrcParser.Demo() : LrcParser.Demo();
+        controller.LoadDemo(doc, DemoCover());
+        var view = new NowPlayingView(controller, settings);
+        var window = new Window
+        {
+            Title = "QA · 换行动画",
+            Width = 1240,
+            Height = 820,
+            Background = Brushes.Black,
+            Content = view,
+            WindowStartupLocation = WindowStartupLocation.CenterScreen,
+        };
+        window.Show();
+        app.Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
+        for (int i = 0; i < 10; i++) Pump(app, 50);
+
+        int cueIndex = int.TryParse(Arg(args, "--cue"), out var ci) ? ci : Math.Min(3, doc.Lines.Count - 1);
+        long cueMs = doc.Lines[Math.Clamp(cueIndex, 0, doc.Lines.Count - 1)].StartMs;
+        var lines = new List<string> { $"cue={cueIndex} at {cueMs}ms frames=10 step=38ms" };
+
+        view.DebugPinPosition(cueMs - 400);
+        for (int i = 0; i < 10; i++) Pump(app, 50);
+        // 逐字墨水平时是分帧建的；定格画面里一次性建完，才能拍到「上一行几乎唱满」时换行的样子。
+        view.DebugBuildAllWordParts();
+        for (int i = 0; i < 6; i++) Pump(app, 50);
+        Save(window, Path.Combine(dir, "f-before.png"));
+        lines.Add("before " + view.DebugKaraoke);
+
+        for (int f = 0; f < 10; f++)
+        {
+            view.DebugPinPositionAnimated(cueMs + f * 4);
+            Thread.Sleep(25);
+            app.Dispatcher.Invoke(() => { }, DispatcherPriority.Render);
+            Save(window, Path.Combine(dir, $"f{f:00}.png"));
+            lines.Add($"f{f:00} ~{(f + 1) * 25}ms {view.DebugState()} | {view.DebugKaraoke}");
+        }
+        File.WriteAllLines(Path.Combine(dir, "film.txt"), lines);
+        window.Close();
+        app.Shutdown();
+    }
+
     private static void RunPlayerGlow(Application app, string[] args, AppSettings settings)
     {
         string dir = Arg(args, "--player-glow") ?? ".";
@@ -3669,6 +4108,176 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
                 bitmap.Save(Path.Combine(dir, "page-more.png"), System.Drawing.Imaging.ImageFormat.Png);
             }
             pageLines.Add("more menu: screen captured");
+            // —— 拖动/缩放帧率：页面开着时分开量「静态 / 移动 / 缩放 / 关掉主题背景再缩放」——
+            // 移动和缩放都用真实的窗口属性驱动，走的是用户拖窗口时同一条 SetWindowPos 路径。
+            if (args.Contains("--page-fps"))
+            {
+                main.DebugOpenPlayerPage();
+                main.Width = 1240;
+                main.Height = 820;
+                for (int i = 0; i < 16; i++) PumpFrames(40);
+                pageLines.Add("backdrop: " + (main.PlayerView?.DebugBackdropEdge() ?? "null"));
+                pageLines.Add("state: " + (main.PlayerView?.DebugState() ?? "null"));
+
+                void Phase(string tag, int ms, Action<int> step)
+                {
+                    main.StartFrameMonitor(ms);
+                    var clock = System.Diagnostics.Stopwatch.StartNew();
+                    int n = 0;
+                    while (clock.ElapsedMilliseconds < ms)
+                    {
+                        step(n++);
+                        PumpFrames(8);
+                    }
+                    PumpFrames(150);
+                    pageLines.Add($"{tag,-14} {main.DebugFrameStats()}");
+                }
+
+                Phase("static", 1600, _ => { });
+                {
+                    var cpuProcS = System.Diagnostics.Process.GetCurrentProcess();
+                    var cpuS0 = cpuProcS.TotalProcessorTime;
+                    PumpFrames(1500);
+                    var cpuS1 = cpuProcS.TotalProcessorTime;
+                    pageLines.Add($"refresh={NativeMethods.DisplayRefreshHz()}Hz " +
+                                  $"static cpu={((cpuS1 - cpuS0).TotalMilliseconds / 1500 * 100):0}% of one core");
+                }
+                if (main.PlayerView != null) pageLines.Add("render: " + main.PlayerView.DebugRenderStats());
+
+                // 把歌词刷新提到「每帧一次」（= 屏幕刷新率），量现在这套渲染能不能撑住
+                var pageView = main.PlayerView;
+                if (pageView != null)
+                {
+                    // A/B：同一套界面里切换「烘焙贴图」与「字形轮廓填充」
+                    Controls.LyricStackView.UseBakedText = false;
+                    pageView.RefreshFromSettings();
+                    PumpFrames(250);
+                    Phase("fps-geometry", 1400, _ => { });
+                    pageLines.Add("draw cost geometry: " + pageView.DebugDrawCost());
+                    Controls.LyricStackView.UseBakedText = true;
+                    pageView.RefreshFromSettings();
+                    PumpFrames(250);
+                    Phase("fps-baked", 1400, _ => { });
+                    pageLines.Add("draw cost baked   : " + pageView.DebugDrawCost());
+                }
+                if (pageView != null)
+                {
+                    var tickClock = System.Diagnostics.Stopwatch.StartNew();
+                    System.EventHandler tickEveryFrame = (_, _) =>
+                        pageView.DebugAdvance((long)tickClock.Elapsed.TotalMilliseconds);
+                    System.Windows.Media.CompositionTarget.Rendering += tickEveryFrame;
+                    Phase("tick-every-frame", 1600, _ => { });
+                    pageLines.Add("render: " + pageView.DebugRenderStats());
+                    System.Windows.Media.CompositionTarget.Rendering -= tickEveryFrame;
+
+                    var swTick = System.Diagnostics.Stopwatch.StartNew();
+                    for (int i = 0; i < 120; i++) pageView.DebugAdvance(20000 + i * 8);
+                    swTick.Stop();
+                    pageLines.Add($"tick cost: {swTick.Elapsed.TotalMilliseconds / 120:0.00} ms/tick " +
+                                  $"(120 ticks, 静止调用)");
+
+                    // 成本归因：逐项关掉，看帧率往哪走
+                    pageLines.Add($"render tier: {System.Windows.Media.RenderCapability.Tier >> 16} " +
+                                  $"hw={(System.Windows.Media.RenderCapability.IsPixelShaderVersionSupported(2, 0) ? 1 : 0)}");
+                    var tickClock2 = System.Diagnostics.Stopwatch.StartNew();
+                    System.EventHandler tickAlways = (_, _) =>
+                        pageView.DebugAdvance((long)tickClock2.Elapsed.TotalMilliseconds);
+                    System.Windows.Media.CompositionTarget.Rendering += tickAlways;
+
+                    pageView.DebugSetPartVisible("backdrop", false);
+                    Phase("no-backdrop", 1200, _ => { });
+                    pageView.DebugSetPartVisible("backdrop", true);
+
+                    pageView.DebugSetPartVisible("lyrics", false);
+                    Phase("no-lyrics", 1200, _ => { });
+                    pageView.DebugSetPartVisible("lyrics", true);
+
+                    settings.PlayerGlow = false;
+                    pageView.RefreshFromSettings();
+                    Phase("no-glow", 1200, _ => { });
+                    settings.PlayerGlow = true;
+                    pageView.RefreshFromSettings();
+
+                    settings.PlayerPerspective = false;
+                    pageView.RefreshFromSettings();
+                    Phase("no-perspective", 1200, _ => { });
+                    settings.PlayerPerspective = true;
+                    pageView.RefreshFromSettings();
+
+                    // 稳定的软件绘制成本（不受机器负载影响），用它做归因
+                    pageLines.Add("draw cost         : " + pageView.DebugDrawCost());
+                    settings.PlayerGlow = false;
+                    pageView.RefreshFromSettings();
+                    pageLines.Add("draw cost glowOff : " + pageView.DebugDrawCost());
+                    settings.PlayerGlow = true;
+                    pageView.RefreshFromSettings();
+                    settings.PlayerPerspective = false;
+                    pageView.RefreshFromSettings();
+                    pageLines.Add("draw cost perspOff: " + pageView.DebugDrawCost());
+                    settings.PlayerPerspective = true;
+                    pageView.RefreshFromSettings();
+
+                    System.Windows.Media.CompositionTarget.Rendering -= tickAlways;
+                }
+                double lx = main.Left, ly = main.Top;
+                Phase("move", 1600, i =>
+                {
+                    main.Left = lx + (i % 60) * 6;
+                    main.Top = ly + (i % 18);
+                });
+                main.Left = lx;
+                main.Top = ly;
+                main.UpdateLayout();
+                // 用户真的按住拖动时，窗口进入 move 模态循环（WM_ENTERSIZEMOVE），页面按新逻辑挂起重绘
+                var handle = new System.Windows.Interop.WindowInteropHelper(main).Handle;
+                string beforeHold = pageView?.DebugRenderStats() ?? "n/a";
+                NativeMethods.SendMessage(handle, 0x0231, IntPtr.Zero, IntPtr.Zero);
+                PumpFrames(150);
+                Phase("move-held", 1600, i =>
+                {
+                    main.Left = lx + (i % 60) * 6;
+                    main.Top = ly + (i % 18);
+                });
+                pageLines.Add($"held renders: {beforeHold} -> {pageView?.DebugRenderStats()}");
+                main.Left = lx;
+                main.Top = ly;
+                NativeMethods.SendMessage(handle, 0x0232, IntPtr.Zero, IntPtr.Zero);
+                Phase("resume", 800, _ => { });
+                Phase("resize", 1600, i =>
+                {
+                    main.Width = 1240 - (i % 50) * 4;
+                    main.UpdateLayout();
+                });
+                main.Width = 1240;
+                PumpFrames(200);
+                // 修前的状态：页面开着但主题背景还活着（全窗高斯模糊留在渲染树里）
+                main.DebugSetThemeBackdrop(true);
+                PumpFrames(200);
+                Phase("resize+theme", 1600, i =>
+                {
+                    main.Width = 1240 - (i % 50) * 4;
+                    main.UpdateLayout();
+                });
+                main.Width = 1240;
+                main.DebugSetThemeBackdrop(false);
+
+                // 单步 CPU：和上面 playerpage 口径相同，用来对比修前修后
+                for (int i = 0; i < 8; i++) PumpFrames(40);
+                var proc2 = System.Diagnostics.Process.GetCurrentProcess();
+                var cpuA = proc2.TotalProcessorTime;
+                var swA = System.Diagnostics.Stopwatch.StartNew();
+                for (int i = 0; i < 40; i++)
+                {
+                    main.Width = 1180 - i * 12;
+                    main.UpdateLayout();
+                    PumpFrames(12);
+                }
+                swA.Stop();
+                var cpuB = proc2.TotalProcessorTime;
+                pageLines.Add($"resize 40 steps: wall={swA.ElapsedMilliseconds}ms " +
+                              $"cpu={(cpuB - cpuA).TotalMilliseconds:0}ms ({((cpuB - cpuA).TotalMilliseconds / 40):0.0} ms/step)");
+            }
+
             File.WriteAllLines(Path.Combine(dir, "page.txt"), pageLines);
         }
 
@@ -3679,6 +4288,42 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
             Save(main, Path.Combine(dir, "cover-backdrop.png"));
             File.WriteAllText(Path.Combine(dir, "cover-backdrop.txt"),
                 $"current={controller.Current?.DisplayTitle ?? "(none)"} cover={(controller.Current?.Cover != null ? "bitmap" : "none")}");
+        }
+        if (args.Contains("--theme-blur-shot"))
+        {
+            // QA: 背景磨砂滑条。必须走 ApplySettings（滑条真正的路径），不是 ApplyAppearance。
+            var originalBlur = settings.ThemeBlur;
+            var originalImage = settings.ThemeImage;
+            string? qaImage = Arg(args, "--image");
+            if (qaImage != null && File.Exists(qaImage))
+            {
+                // 磨砂要有底图才看得见；--image 给一张真图，比封面更可控。
+                settings.ThemeImage = qaImage;
+                main.ApplyAppearance();
+            }
+            else
+            {
+                main.DebugUseCoverBackdrop();   // 需要有底图，否则磨砂没有东西可糊
+            }
+            for (int i = 0; i < 6; i++) Pump(app, 60);
+            var lines = new List<string>();
+            foreach (var blur in new[] { 0.0, 20.0, 40.0, 60.0 })
+            {
+                settings.ThemeBlur = blur;
+                main.DebugApplySettings();
+                for (int k = 0; k < 6; k++) Pump(app, 60);
+                Save(main, Path.Combine(dir, $"blur-{blur:0}.png"));
+                lines.Add($"blur={blur:0} effect={main.DebugThemeEffect()} " +
+                          $"{main.DebugSaveThemeImage(Path.Combine(dir, $"img-{blur:0}.png"))}");
+            }
+            settings.ThemeBlur = originalBlur;
+            settings.ThemeImage = originalImage;
+            main.DebugApplySettings();
+            main.ApplyAppearance();
+            for (int i = 0; i < 6; i++) Pump(app, 60);
+            Save(main, Path.Combine(dir, "blur-restored.png"));
+            lines.Add($"restored={originalBlur:0} effect={main.DebugThemeEffect()}");
+            File.WriteAllLines(Path.Combine(dir, "theme-blur.txt"), lines);
         }
         if (args.Contains("--tint-shot"))
         {

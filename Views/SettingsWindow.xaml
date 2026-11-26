@@ -83,7 +83,7 @@
                                 <TextBlock Text="3D 倾斜角度" FontSize="13" />
                                 <TextBlock x:Name="lblTilt" Text="-32°" HorizontalAlignment="Right" FontSize="12" Foreground="{DynamicResource AccentBrush}" />
                             </Grid>
-                            <controls:DragOnlySlider x:Name="sldTilt" Style="{StaticResource ThinSlider}" Minimum="-50" Maximum="0" Value="-32" Margin="0,8,0,0" />
+                            <controls:DragOnlySlider x:Name="sldTilt" Style="{StaticResource ThinSlider}" Minimum="-85" Maximum="0" Value="-32" Margin="0,8,0,0" />
                         </StackPanel>
                         <Border Height="1" Background="{DynamicResource HairlineBrush}" />
                         <StackPanel Margin="0,12">
@@ -336,6 +336,11 @@
                         <Grid Margin="0,12">
                             <TextBlock Text="窗口置顶" FontSize="13" VerticalAlignment="Center" />
                             <CheckBox x:Name="chkTopmost" Style="{StaticResource Switch}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                        </Grid>
+                        <Border Height="1" Background="{DynamicResource HairlineBrush}" />
+                        <Grid x:Name="aboveRow" Margin="0,12">
+                            <TextBlock Text="显示在其他应用上层" FontSize="13" VerticalAlignment="Center" />
+                            <CheckBox x:Name="chkAboveApps" Style="{StaticResource Switch}" HorizontalAlignment="Right" VerticalAlignment="Center" />
                         </Grid>
                     </StackPanel>
                 </Border>

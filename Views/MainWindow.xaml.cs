@@ -73,6 +73,15 @@ public partial class MainWindow : Window
 
         Loaded += OnLoaded;
 
+        // Dragging or resizing the window runs a modal loop on this thread. Holding the page's lyric
+        // painting for the duration is what makes the window follow the cursor instead of catching up
+        // in steps (the page repaints eight lines plus their glow, several milliseconds each frame).
+        SourceInitialized += (_, _) =>
+        {
+            if (PresentationSource.FromVisual(this) is System.Windows.Interop.HwndSource source)
+                source.AddHook(WindowLoopHook);
+        };
+
         Closed += (_, _) =>
         {
             // Always tear the overlay down first, and never let a cleanup exception keep the
@@ -1932,6 +1941,10 @@ public partial class MainWindow : Window
             {
                 sidebarLayer.Visibility = Visibility.Collapsed;
                 libraryLayer.Visibility = Visibility.Collapsed;
+                // The page paints its own opaque backdrop, so the themed one underneath is fully
+                // covered. Leaving it alive costs a full-window gaussian blur (ThemeBlur, up to 60)
+                // on every resize frame, which is most of the hitch while dragging the window edge.
+                themeBackdrop.Visibility = Visibility.Collapsed;
                 playerPage.BeginAnimation(OpacityProperty, null);
                 playerPage.Opacity = 1;
             };
@@ -1947,6 +1960,7 @@ public partial class MainWindow : Window
         // restore the minimum size now — the page's relaxed limits must not leak into the library.
         sidebarLayer.Visibility = Visibility.Visible;
         libraryLayer.Visibility = Visibility.Visible;
+        themeBackdrop.Visibility = Visibility.Visible;
         if (ActualWidth < 1080) Width = 1180;
         if (ActualHeight < 600) Height = 760;
         MinWidth = 1080;
@@ -1972,6 +1986,23 @@ public partial class MainWindow : Window
     public NowPlayingView? PlayerView => _nowPlayingView;
     public string DebugPlayerPageState() =>
         $"visible={playerPage.Visibility} view={(_nowPlayingView != null)} children={playerPage.Children.Count}";
+
+    /// <summary>QA: switch the themed window backdrop on or off, so the resize cost of the full-window
+    /// blur can be measured on its own.</summary>
+    internal void DebugSetThemeBackdrop(bool on) =>
+        themeBackdrop.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+
+    private const int WM_ENTERSIZEMOVE = 0x0231;
+    private const int WM_EXITSIZEMOVE = 0x0232;
+
+    /// <summary>Tells the now-playing page to stop repainting while the window is being dragged, and
+    /// to catch up once in a single paint when the loop ends.</summary>
+    private IntPtr WindowLoopHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg == WM_ENTERSIZEMOVE) _nowPlayingView?.SetWindowDragHold(true);
+        else if (msg == WM_EXITSIZEMOVE) _nowPlayingView?.SetWindowDragHold(false);
+        return IntPtr.Zero;
+    }
 
     protected override void OnKeyDown(KeyEventArgs e)
     {
@@ -2148,7 +2179,45 @@ public partial class MainWindow : Window
             _themeSignature = signature;
             ApplyAppearance();
         }
+        // 背景磨砂不在上面那个签名里（重排配色不需要跟着重跑），但它只能靠 ApplyAppearance 落到
+        // themeImage.Effect 上 —— 以前这里什么都不做，所以磨砂滑块拖到底也没反应。
+        if (Math.Abs(settings.ThemeBlur - _themeBlurApplied) > 0.01) ApplyThemeBlur();
         UpdateOverlayForFocus();
+    }
+
+    private double _themeBlurApplied = double.NaN;
+
+    /// <summary>Frosting of the backdrop image, 0..60 px. Cheap on its own: only the blurred element's
+    /// effect changes, so a slider drag does not re-run the palette.</summary>
+    private void ApplyThemeBlur()
+    {
+        double blur = Math.Clamp(_settings.ThemeBlur, 0, 60);
+        if (Math.Abs(blur - _themeBlurApplied) < 0.01) return;
+        _themeBlurApplied = blur;
+        themeImage.Effect = blur > 0.5
+            ? new System.Windows.Media.Effects.BlurEffect
+            {
+                Radius = blur,
+                RenderingBias = System.Windows.Media.Effects.RenderingBias.Performance,
+            }
+            : null;
+        ApplyThemeImageGeometry(blur);
+    }
+
+    /// <summary>
+    /// The window backdrop is a "fill and crop" picture, so the picture has to be centred and bled
+    /// past the window edges. It used to be laid out at the window's top-left corner: the window then
+    /// showed the artwork's top-left corner instead of its middle, which put the thin light border
+    /// baked into the cover file exactly on the window's top edge — a bright strip that faded out
+    /// over the blur radius (user report: 窗口上方有一个颜色渐变). The bleed also keeps the blur's own
+    /// edge fade (the blur samples outside the picture, so its outermost pixels turn transparent)
+    /// outside the visible area, so the top edge is just picture.
+    /// </summary>
+    private void ApplyThemeImageGeometry(double blur)
+    {
+        double pad = Math.Max(16, blur * 2 + 16);
+        var margin = new Thickness(-pad);
+        if (themeImage.Margin != margin) themeImage.Margin = margin;
     }
 
     /// <summary>Recolours the whole window from the theme colour and rebuilds the backdrop. The
@@ -2188,6 +2257,8 @@ public partial class MainWindow : Window
                 RenderingBias = System.Windows.Media.Effects.RenderingBias.Performance,
             }
             : null;
+        ApplyThemeImageGeometry(blur);
+        _themeBlurApplied = blur;
     }
 
     /// <summary>Song-cover backdrops change with the track, so this runs on every track change.</summary>
@@ -2231,6 +2302,34 @@ public partial class MainWindow : Window
     {
         _coverBackdropOverride = true;
         ApplyAppearance();
+    }
+
+    /// <summary>QA: run the exact path the 界面外观 sliders use (ApplySettings, not ApplyAppearance) —
+    /// that difference is what hid the 背景磨砂 slider doing nothing.</summary>
+    internal void DebugApplySettings() => ApplySettings(_settings);
+
+    /// <summary>QA: what the backdrop image's effect actually is.</summary>
+    internal string DebugThemeEffect() => themeImage.Effect switch
+    {
+        System.Windows.Media.Effects.BlurEffect b => $"blur r={b.Radius:0.##}",
+        null => "none",
+        _ => "other",
+    };
+
+    /// <summary>QA: render the backdrop image on its own (effect included) so a blur radius can be
+    /// measured in pixels, without whatever the window paints on top of it.</summary>
+    internal string DebugSaveThemeImage(string path)
+    {
+        int w = (int)Math.Round(themeImage.ActualWidth), h = (int)Math.Round(themeImage.ActualHeight);
+        if (themeImage.Source == null) return $"src=null size={w}x{h}";
+        if (w < 8 || h < 8) return $"src={themeImage.Source.Width}x{themeImage.Source.Height} size={w}x{h}";
+        var rtb = new System.Windows.Media.Imaging.RenderTargetBitmap(w, h, 96, 96,
+            System.Windows.Media.PixelFormats.Pbgra32);
+        rtb.Render(themeImage);
+        var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
+        encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(rtb));
+        using (var stream = System.IO.File.Create(path)) encoder.Save(stream);
+        return $"src={themeImage.Source.Width}x{themeImage.Source.Height} size={w}x{h} effect={DebugThemeEffect()}";
     }
 
     /// <summary>QA only: pretend "当前歌曲封面" is the chosen backdrop without touching settings.</summary>
@@ -2328,14 +2427,16 @@ public partial class MainWindow : Window
         double span = Math.Max(1, _frameClock.Elapsed.TotalMilliseconds - _monitorStartMs);
         double fps = _frameCount * 1000.0 / span;
         double avg = _frameDeltas.Count > 0 ? _frameDeltas.Average() : 0;
-        int over20 = 0, over33 = 0;
+        int over20 = 0, over33 = 0, over6 = 0, over9 = 0;
         foreach (var d in _frameDeltas)
         {
             if (d > 20) over20++;
             if (d > 33) over33++;
+            if (d > 6.2) over6++;
+            if (d > 9) over9++;
         }
         return $"fps={fps:0} frames={_frameCount} avgMs={avg:0.0} worstMs={_worstFrameMs:0.0} " +
-               $"over20={over20} over33={over33}";
+               $"over6={over6} over9={over9} over20={over20} over33={over33}";
     }
 
     /// <summary>QA: opens the desktop-lyrics settings window so its sliders can be timed.</summary>

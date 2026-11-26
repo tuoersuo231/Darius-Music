@@ -18,7 +18,7 @@ public static class PerspectiveWarp
     /// as "the text got squashed" rather than "further away". Beyond this ratio the size range is
     /// compressed uniformly — the trapezoid and the baseline fan stay, the crushing does not.
     /// </summary>
-    public static double MaxDepthRatio { get; set; } = 1.90;
+    public static double MaxDepthRatio { get; set; } = 3.00;
 
     /// <summary>Camera distance that gives a clearly readable near/far ratio.</summary>
     /// <summary>
@@ -187,29 +187,41 @@ public readonly struct LyricPlane
         Strength = gain;
     }
 
-    /// <summary>Tilt at which the fan is at full strength; a smaller angle scales the gain down.</summary>
-    private const double FullTiltDegrees = 30.0;
+    /// <summary>Tilt at which the fan is at its "reference" strength; kept for the doc value only.</summary>
+    private const double FullTiltDegrees = 45.0;
 
     public static LyricPlane For(double width, double angleDeg, double vanishingOffset, double fanReference = 0)
     {
         double apex = Math.Max(width * Math.Max(vanishingOffset, 0.05), 40);
+        double maxRatio = Math.Max(1.01, PerspectiveWarp.MaxDepthRatio);
 
-        double gain = Math.Abs(Math.Sin(angleDeg * Math.PI / 180)) / Math.Sin(FullTiltDegrees * Math.PI / 180);
+        // 强度线性映射到滑块行程（0..85°），不再走 sin —— 旧公式 30° 以上就饱和了。
+        // 但必须落在 gain 上，不能直接定 end：只有 gain 里带着 apex，「交点位置」才会改变扇形强度；
+        // 直接定 end 会把 apex 约掉，交点滑条就完全失效（1.2.40 就是这么坏的）。
+        double travel = Math.Clamp(Math.Abs(angleDeg) / MaxSliderDegrees, 0, 1);
+        double gain = travel * MaxGain;
         // A narrow column shows the same drop over fewer pixels, which reads as a steeper fan; scale
         // the gain by width/reference so the angle looks identical at any window size.
         if (fanReference > 0 && width > 0 && width < fanReference) gain *= width / fanReference;
-        gain = Math.Clamp(gain, 0, 1);
+        gain = Math.Clamp(gain, 0, 4.0);
 
         // Cap the size range: a fan wider than MaxDepthRatio makes the far end look pinched, so the
         // gain is reduced rather than the geometry being abandoned.
-        double max = Math.Max(1.01, PerspectiveWarp.MaxDepthRatio);
         double rawEnd = 1 + gain * width / apex;
-        if (rawEnd > max && rawEnd > 1.0001) gain *= (max - 1) / (rawEnd - 1);
+        if (rawEnd > maxRatio && rawEnd > 1.0001) gain *= (maxRatio - 1) / (rawEnd - 1);
 
         double end = 1 + gain * width / apex;
         double fit = width / Math.Max(width * (0.5 + 0.5 * end), 1);
         return new LyricPlane(angleDeg, apex, gain, fit, end * fit);
     }
+
+    /// <summary>Gain at the end of the slider's travel. Tuned so the default vanishing point (1.6
+    /// columns) reaches ~2.8× near/far; a closer vanishing point hits
+    /// <see cref="PerspectiveWarp.MaxDepthRatio"/> instead of blowing up.</summary>
+    private const double MaxGain = 3.0;
+
+    /// <summary>Angle at which the slider's travel ends (the UI's minimum).</summary>
+    public const double MaxSliderDegrees = 85.0;
 
     /// <summary>Glyph scale at source column <paramref name="x"/> (equal on both axes).</summary>
     public double Scale(double x) => (1 + _gain * x / _apex) * Fit;

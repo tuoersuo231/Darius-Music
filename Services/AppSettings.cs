@@ -61,6 +61,10 @@ public sealed class AppSettings
     // Desktop-only extras
     public bool Locked { get; set; } = false;       // true = mouse click-through
     public bool Topmost { get; set; } = true;
+    /// <summary>Keep the overlay above *other topmost windows* too (games, players, Task Manager), by
+    /// re-asserting HWND_TOPMOST whenever another window is activated. Transparent backdrop only — an
+    /// opaque lyric panel parked over every application is not something anyone wants.</summary>
+    public bool OverlayAboveApps { get; set; } = false;
 
     // ---- 界面外观（整个窗口共用） ----
     public string ThemeAccent { get; set; } = Palette.DefaultAccent;   // 主色
@@ -196,7 +200,7 @@ public sealed class AppSettings
         BackdropFadeH = Math.Clamp(BackdropFadeH, 0, MaxFadeHPercent),
         BackdropFadeV = Math.Clamp(BackdropFadeV, 0, MaxFadeVPercent),
         Perspective = Perspective,
-        TiltAngle = Math.Clamp(TiltAngle, -60, 0),
+        TiltAngle = Math.Clamp(TiltAngle, -88, 0),
         VanishingOffset = Math.Clamp(VanishingOffset, 0.25, 6.0),
         VisibleLines = Math.Clamp(VisibleLines, 3, 15),
         CustomPosition = CustomPosition,
@@ -214,6 +218,7 @@ public sealed class AppSettings
         GlowColor = Sanitize(GlowColor, "E0E0E0"),
         Locked = Locked,
         Topmost = Topmost,
+        OverlayAboveApps = OverlayAboveApps && BackdropMode == BackdropMode.Transparent,
         ThemeAccent = Palette.Normalize(ThemeAccent, Palette.DefaultAccent),
         ThemeSurface = Palette.Normalize(ThemeSurface, Palette.DefaultSurface),
         ThemeOpacity = Math.Clamp(ThemeOpacity, 0, 100),
@@ -228,7 +233,7 @@ public sealed class AppSettings
         PlayerTranslation = PlayerTranslation,
         PlayerGlow = PlayerGlow,
         PlayerPerspective = PlayerPerspective,
-        PlayerTiltAngle = Math.Clamp(PlayerTiltAngle, -60, 0),
+        PlayerTiltAngle = Math.Clamp(PlayerTiltAngle, -88, 0),
         PlayerVanishingOffset = Math.Clamp(PlayerVanishingOffset, 0.25, 6.0),
         PlayerGlowStrength = Math.Clamp(PlayerGlowStrength, 0, 2),
         PlayerGlowSpread = Math.Clamp(PlayerGlowSpread, 0.5, 2),

@@ -109,8 +109,11 @@ public sealed class NowPlayingView : Grid
 
         // Background: the current cover, pre-blurred into a small bitmap (no live effect — see
         // RebuildBackdrop) and pushed down; a vertical scrim keeps the text legible.
+        // The source is a deliberately low-resolution blur, so Fant ("HighQuality") was paying for
+        // detail that is not there; bilinear sampling of a blurred image is indistinguishable and
+        // was 15.6 ms of the page's software draw cost.
         _backdrop.Stretch = Stretch.UniformToFill;
-        RenderOptions.SetBitmapScalingMode(_backdrop, BitmapScalingMode.HighQuality);
+        RenderOptions.SetBitmapScalingMode(_backdrop, BitmapScalingMode.Linear);
         _backdrop.Opacity = 0.9;
 
         _scrim.Fill = new LinearGradientBrush
@@ -135,7 +138,7 @@ public sealed class NowPlayingView : Grid
         };
         _coverFrame = new Border
         {
-            CornerRadius = new CornerRadius(14),
+            CornerRadius = new CornerRadius(0),
             Background = _coverFallback,
             ClipToBounds = true,
             Child = _coverGlyph,
@@ -292,7 +295,9 @@ public sealed class NowPlayingView : Grid
 
         _stack.BackdropDrawnByHost = true;
         _stack.IsHitTestVisible = false;
-        _stack.SoftNeighbours = true;
+        // 邻行的「九次位移涂抹」会把笔画糊粗一圈，桌面歌词窗一直是关的（所以那边字看着正常），
+        // 播放页却开着 —— 用户看到的「非读取行字体粗」就是这个。这里跟桌面歌词对齐：关掉。
+        _stack.SoftNeighbours = false;
         _stack.FanReferenceWidth = TiltReferenceWidth;
         _noLyrics = new TextBlock
         {
@@ -380,8 +385,13 @@ public sealed class NowPlayingView : Grid
         _player.LyricsChanged += OnLyricsChanged;
         _player.StateChanged += OnStateChanged;
         _player.Tick += OnTick;
+        // The lyrics repaint on the composition tick, not on the 16 ms player clock: that clock
+        // exists to move the progress bar and to end/advance a track, and painting from it capped
+        // the karaoke at 60 Hz on a 179 Hz display (the "帧数提不上去" the user could see).
+        System.Windows.Media.CompositionTarget.Rendering += OnFrameTick;
         Unloaded += (_, _) =>
         {
+            System.Windows.Media.CompositionTarget.Rendering -= OnFrameTick;
             _player.TrackChanged -= OnTrackChanged;
             _player.CoverChanged -= OnCoverArrived;
             _player.LyricsChanged -= OnLyricsChanged;
@@ -420,7 +430,7 @@ public sealed class NowPlayingView : Grid
             var head = new StackPanel { Orientation = Orientation.Horizontal };
             _coverFrame.Width = 86;
             _coverFrame.Height = 86;
-            _coverFrame.CornerRadius = new CornerRadius(12);
+            _coverFrame.CornerRadius = new CornerRadius(0);
             _coverFrame.HorizontalAlignment = HorizontalAlignment.Left;
             _coverFrame.VerticalAlignment = VerticalAlignment.Top;
             head.Children.Add(_coverFrame);
@@ -513,7 +523,7 @@ public sealed class NowPlayingView : Grid
             _coverFrame.VerticalAlignment = VerticalAlignment.Center;
             _coverFrame.Width = 46;
             _coverFrame.Height = 46;
-            _coverFrame.CornerRadius = new CornerRadius(10);
+            _coverFrame.CornerRadius = new CornerRadius(0);
             _coverFrame.Margin = new Thickness(0);
             _info.Margin = new Thickness(12, 0, 0, 0);
             _info.VerticalAlignment = VerticalAlignment.Center;
@@ -630,7 +640,7 @@ public sealed class NowPlayingView : Grid
         {
             _resizeRelease?.Stop();
             _resizeHold = false;
-            _stack.SoftNeighbours = true;
+            _stack.SoftNeighbours = false;
             _stack.Snap();
         };
         _resizeRelease.Start();
@@ -638,15 +648,35 @@ public sealed class NowPlayingView : Grid
         _stack.SoftNeighbours = false;
     }
 
-    /// <summary>Portrait: cover is a big square (60% of the width) when the big-cover page is on.</summary>
-    private void UpdateCoverSize()
+    /// <summary>WM_ENTERSIZEMOVE / WM_EXITSIZEMOVE. A window move or resize runs its modal loop on
+    /// this thread, so every millisecond the page spends redrawing lyrics is a millisecond the window
+    /// does not follow the cursor — which is what "dragging stutters" actually is.</summary>
+    private bool _dragHold;
+
+    public void SetWindowDragHold(bool on)
     {
+        if (_dragHold == on) return;
+        _dragHold = on;
+        if (on)
+        {
+            _stack.SoftNeighbours = false;
+            return;
+        }
+        // Back out of the loop: catch up in one paint instead of replaying the skipped frames.
+        _stack.SoftNeighbours = true;
+        _stack.Snap();
+        ApplyPlayerSettings();
+        OnTick(_player.PositionMs);       // 进度条与两个时间标签补齐
+    }
+
+    /// <summary>Portrait: cover is a big square (60% of the width) when the big-cover page is on.</summary>
+    private void UpdateCoverSize()    {
         if (_wide) return;
         if (_compactHeader) return;
         double side = Math.Clamp(ActualWidth * 0.56, 160, 420);
         _coverFrame.Width = side;
         _coverFrame.Height = side;
-        _coverFrame.CornerRadius = new CornerRadius(16);
+        _coverFrame.CornerRadius = new CornerRadius(0);
     }
 
     private DispatcherTimer? _blurTimer;
@@ -706,25 +736,35 @@ public sealed class NowPlayingView : Grid
 
         const int w = 480;
         int h = Math.Max(1, (int)Math.Round(w * (double)_cover.PixelHeight / Math.Max(1, _cover.PixelWidth)));
+        double radiusPx = radius * w / Math.Max(1, _cover.PixelWidth);
+
+        // BlurEffect samples past the visual's own bounds, so baking straight into a w×h bitmap
+        // leaves a translucent rim — stretched over the window that rim is the dark band that ringed
+        // all four edges of the page. Bake into a padded bitmap and keep only the middle, so the
+        // result stays opaque right up to its border.
+        int pad = (int)Math.Ceiling(radiusPx * 3) + 2;
+        int pw = w + pad * 2, ph = h + pad * 2;
+
         var baseVisual = new DrawingVisual();
         using (var dc = baseVisual.RenderOpen())
-            dc.DrawImage(_cover, new Rect(0, 0, w, h));
-        var flat = new RenderTargetBitmap(w, h, 96, 96, PixelFormats.Pbgra32);
+            dc.DrawImage(_cover, BackdropBlur.FillRect(_cover, pw, ph));
+        var flat = new RenderTargetBitmap(pw, ph, 96, 96, PixelFormats.Pbgra32);
         flat.Render(baseVisual);
         flat.Freeze();
 
         var blurredVisual = new DrawingVisual
         {
-            Effect = new BlurEffect
-            {
-                Radius = radius * w / Math.Max(1, _cover.PixelWidth),
-                KernelType = KernelType.Gaussian,
-            },
+            Effect = radiusPx > 0.5
+                ? new BlurEffect { Radius = radiusPx, KernelType = KernelType.Gaussian }
+                : null,
         };
         using (var dc = blurredVisual.RenderOpen())
-            dc.DrawImage(flat, new Rect(0, 0, w, h));
-        var blurred = new RenderTargetBitmap(w, h, 96, 96, PixelFormats.Pbgra32);
-        blurred.Render(blurredVisual);
+            dc.DrawImage(flat, new Rect(0, 0, pw, ph));
+        var padded = new RenderTargetBitmap(pw, ph, 96, 96, PixelFormats.Pbgra32);
+        padded.Render(blurredVisual);
+        padded.Freeze();
+
+        var blurred = new CroppedBitmap(padded, new Int32Rect(pad, pad, w, h));
         blurred.Freeze();
 
         _blurred = blurred;
@@ -894,7 +934,11 @@ public sealed class NowPlayingView : Grid
     private void OnTick(double positionMs)
     {
         if (!IsVisible) return;
-        if (!_resizeHold) _stack.Tick(_demoPin ?? (long)Math.Max(0, positionMs));
+        // Dragging the window freezes the whole page. The lyric column, the progress bar and both
+        // time labels all repaint, and every one of those is a dirty region the compositor has to
+        // redo while the modal move loop sits on this same thread. SetWindowDragHold() catches the
+        // page up in one go when the loop ends.
+        if (_dragHold) return;
         if (!_dragging)
         {
             _progress.Value = Math.Clamp(positionMs / 1000, 0, _progress.Maximum);
@@ -909,8 +953,15 @@ public sealed class NowPlayingView : Grid
         }
     }
 
-    private void SyncLyrics()
+    /// <summary>One repaint per composed frame, which is what lifts the karaoke above the 60 Hz the
+    /// player clock was imposing. It also advances the scroll/morph animations.</summary>
+    private void OnFrameTick(object? sender, EventArgs e)
     {
+        if (!_initialised || !IsVisible || _resizeHold || _dragHold) return;
+        _stack.Advance(_demoPin ?? (long)Math.Max(0, _player.PositionMs));
+    }
+
+    private void SyncLyrics()    {
         _stack.SetDocument(_player.Lyrics, (long)Math.Max(0, _player.PositionMs));
         _lastCueIndex = _stack.CurrentIndex;
         _noLyrics.Text = _player.Current == null ? "还没有播放歌曲" : "纯音乐，暂无歌词";
@@ -982,7 +1033,7 @@ public sealed class NowPlayingView : Grid
         SliderRow(stack, "当前行放大", 1.0, 2.0, _settings.PlayerCurrentScale,
             v => $"{v:0.00}×", v => _settings.PlayerCurrentScale = Math.Round(v, 2));
         SwitchRow(stack, "3D 倾斜歌词", _settings.PlayerPerspective, on => _settings.PlayerPerspective = on);
-        SliderRow(stack, "3D 倾斜角度", -50, 0, _settings.PlayerTiltAngle,
+        SliderRow(stack, "3D 倾斜角度", -85, 0, _settings.PlayerTiltAngle,
             v => $"{v:0}°", v => _settings.PlayerTiltAngle = Math.Round(v));
         SliderRow(stack, "交点位置", 0.4, 4.0, _settings.PlayerVanishingOffset,
             v => $"{v:0.0}× 列宽", v => _settings.PlayerVanishingOffset = Math.Round(v, 2));
@@ -1183,6 +1234,73 @@ public sealed class NowPlayingView : Grid
     /// <summary>QA: switch the portrait header between the compact and the big-cover form.</summary>
     public void DebugSetCompactHeader(bool compact) => SetCompactHeader(compact);
 
+    /// <summary>QA: drive the lyric renderer directly, so its per-frame cost can be timed without the
+    /// 16 ms player clock in the way.</summary>
+    internal void DebugAdvance(long positionMs) => _stack.Tick(positionMs);
+
+    /// <summary>QA: how long the column's own DrawCore takes per repaint (the geometry emission, not
+    /// WPF's rasterisation of it).</summary>
+    internal string DebugRenderStats() =>
+        $"stack-renders={_stack.RenderCount} lastMs={_stack.LastRenderMs:0.00} " +
+        $"avgMs={(_stack.RenderCount > 0 ? _stack.RenderMsTotal / _stack.RenderCount : 0):0.00}";
+
+    /// <summary>QA: hide the lyric column or the backdrop, to attribute the frame cost.</summary>
+    internal void DebugSetPartVisible(string part, bool on)
+    {
+        if (part == "lyrics") _lyricsHost.Visibility = on ? Visibility.Visible : Visibility.Hidden;
+        else if (part == "backdrop") _backdrop.Visibility = on ? Visibility.Visible : Visibility.Hidden;
+        else if (part == "scrim") _scrim.Visibility = on ? Visibility.Visible : Visibility.Hidden;
+    }
+
+    /// <summary>QA: software draw cost of each layer. RenderTargetBitmap is CPU raster, so the numbers
+    /// are a stable relative measure of how much drawing each layer emits (not the GPU time).</summary>
+    internal string DebugDrawCost()
+    {
+        string Measure(string tag, Visual visual, double w, double h, int iterations = 6)
+        {
+            if (w < 2 || h < 2) return $"{tag}=n/a";
+            var bitmap = new RenderTargetBitmap((int)w, (int)h, 96, 96, PixelFormats.Pbgra32);
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            for (int i = 0; i < iterations; i++) bitmap.Render(visual);
+            clock.Stop();
+            return $"{tag}={clock.Elapsed.TotalMilliseconds / iterations:0.00}ms";
+        }
+
+        var parts = new List<string>();
+        parts.Add(Measure("stack", _stack, _stack.ActualWidth, _stack.ActualHeight));
+        bool soft = _stack.SoftNeighbours;
+        _stack.SoftNeighbours = false;
+        parts.Add(Measure("stack-softOff", _stack, _stack.ActualWidth, _stack.ActualHeight));
+        _stack.SoftNeighbours = soft;
+        parts.Add(Measure("backdrop", _backdrop, _backdrop.ActualWidth, _backdrop.ActualHeight));
+        parts.Add(Measure("page", _root, _root.ActualWidth, _root.ActualHeight, 3));
+        return string.Join(" ", parts);
+    }
+
+    /// <summary>QA: the smallest alpha on each border of the baked backdrop. Anything below 255 is a
+    /// translucent rim, which is what a dark band around the page looks like at the pixel level.</summary>
+    public string DebugBackdropEdge()
+    {
+        if (_blurred == null) return "backdrop=null";
+        var bmp = new FormatConvertedBitmap(_blurred, PixelFormats.Bgra32, null, 0);
+        int w = bmp.PixelWidth, h = bmp.PixelHeight, stride = w * 4;
+        var px = new byte[stride * h];
+        bmp.CopyPixels(px, stride, 0);
+        int Min(int x0, int x1, int y0, int y1)
+        {
+            int m = 255;
+            for (int y = Math.Max(0, y0); y < Math.Min(h, y1); y++)
+                for (int x = Math.Max(0, x0); x < Math.Min(w, x1); x++)
+                {
+                    int a = px[y * stride + x * 4 + 3];
+                    if (a < m) m = a;
+                }
+            return m;
+        }
+        return $"blurred={w}x{h} edgeMinAlpha=[left={Min(0, 1, 0, h)} right={Min(w - 1, w, 0, h)} " +
+               $"top={Min(0, w, 0, 1)} bottom={Min(0, w, h - 1, h)}]";
+    }
+
     /// <summary>QA: the ⋯ sheet's row labels, in the order they are drawn.</summary>
     public string DebugMoreMenuRows() => _rowLabels.Count == 0 ? "(sheet closed)" : string.Join(" | ", _rowLabels);
 
@@ -1216,6 +1334,13 @@ public sealed class NowPlayingView : Grid
         _stack.InvalidateVisual();
     }
 
+    /// <summary>QA: move the pinned clock WITHOUT snapping, so the cue transition can be filmed.</summary>
+    public void DebugPinPositionAnimated(long ms)
+    {
+        _demoPin = ms;
+        _stack.Tick(ms);
+    }
+
     /// <summary>QA: press the transport triangle exactly like a user click.</summary>
     public bool DebugClickPlay()
     {
@@ -1231,4 +1356,10 @@ public sealed class NowPlayingView : Grid
         return $"pos={_player.PositionMs:0} playerCue={index} '{line?.Text}' progress={progress:0.00} " +
                $"stackCue={_stack.CurrentIndex} stackLine='{_stack.CurrentLine?.Text}'";
     }
+
+    /// <summary>QA: the karaoke numbers of the reading line (see LyricStackView.DebugKaraoke).</summary>
+    public string DebugKaraoke => _stack.DebugKaraoke;
+
+    /// <summary>QA: build every word's karaoke ink at once, so a pinned still shows the full fill.</summary>
+    public void DebugBuildAllWordParts() => _stack.DebugBuildAllWordParts();
 }

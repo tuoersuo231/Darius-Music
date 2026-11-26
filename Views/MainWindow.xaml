@@ -15,7 +15,7 @@
     <Grid.Children>
       <Grid x:Name="themeBackdrop" Grid.ColumnSpan="2" ClipToBounds="True" IsHitTestVisible="False">
         <Grid.Children>
-          <Image x:Name="themeImage" Stretch="UniformToFill" />
+          <Image x:Name="themeImage" Stretch="UniformToFill" HorizontalAlignment="Center" VerticalAlignment="Center" />
         </Grid.Children>
       </Grid>
       <Border x:Name="sidebarLayer" Grid.Column="0" Background="{DynamicResource SidebarBrush}" BorderBrush="{DynamicResource HairlineBrush}" BorderThickness="0,0,1,0">
