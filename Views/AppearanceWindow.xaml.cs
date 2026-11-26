@@ -57,6 +57,14 @@ public partial class AppearanceWindow : Window
             txtThemeBlur.Text = $"{e.NewValue:0} px";
             Apply(s => s.ThemeBlur = Math.Round(e.NewValue));
         };
+        chkMinimizeOnClose.Checked += (_, _) =>
+        {
+            if (!_initializing) Apply(s => s.MinimizeOnClose = true);
+        };
+        chkMinimizeOnClose.Unchecked += (_, _) =>
+        {
+            if (!_initializing) Apply(s => s.MinimizeOnClose = false);
+        };
 
         txtVersion.Text = Services.UpdateService.CurrentVersion;
         txtUpdateFeed.Text = Services.UpdateService.ResolveFeed(_settings.UpdateFeed);
@@ -144,6 +152,7 @@ public partial class AppearanceWindow : Window
         txtThemeBlur.Text = $"{_settings.ThemeBlur:0} px";
         sldThemeOpacity.Value = Math.Clamp(_settings.ThemeOpacity, 0, 100);
         sldThemeBlur.Value = Math.Clamp(_settings.ThemeBlur, 0, 60);
+        chkMinimizeOnClose.IsChecked = _settings.MinimizeOnClose;
         RefreshFields();
     }
 
@@ -220,6 +229,9 @@ public partial class AppearanceWindow : Window
     }
 
     private void OnCheckUpdate(object sender, RoutedEventArgs e) => _ = CheckUpdateAsync();
+
+    /// <summary>真正的退出。开了「关闭窗口时最小化」以后标题栏的 ✕ 不再结束进程，这里是备用出口。</summary>
+    private void OnQuit(object sender, RoutedEventArgs e) => Application.Current.Shutdown();
 
     /// <summary>完全离线的更新方式：U 盘/移动硬盘上带着 zip 过来，直接选文件替换，
     /// 不需要任何网络，也不需要更新源地址。</summary>

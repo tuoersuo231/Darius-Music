@@ -56,7 +56,39 @@ public static class Program
             Source = new Uri("pack://application:,,,/Theme.xaml", UriKind.Absolute),
         });
 
+        // 单实例：两个实例同时跑时，第二个实例的 RegisterHotKey 会全部失败（1409），于是「快捷键有时
+        // 生效有时不生效」——2026-11-27 在本机就实测到两个实例并存。第二次启动直接把已有窗口拉到前台。
+        // QA 模式（任何 -- 开头的参数）跳过，否则截图/自动化会被正在运行的实例挡住。
+        if (!args.Any(a => a.StartsWith("--", StringComparison.Ordinal)))
+        {
+            try
+            {
+                if (!Services.SingleInstance.TryAcquire())
+                {
+                    Services.SingleInstance.ActivateExisting();
+                    return;
+                }
+            }
+            catch { }
+        }
+
         var settings = SettingsStore.Load();
+
+        // 游戏（尤其带反作弊的）几乎都以管理员权限运行。UIPI 规定：低权限进程在「高权限窗口位于前台」
+        // 时既收不到 RegisterHotKey 的 WM_HOTKEY，低级键盘钩子也不会被调用 —— 也就是「普通应用里能按、
+        // 游戏里按不动」。用户在快捷键页打开开关后，这里用启动器提权重开一次，然后本进程退出。
+        if (settings.RunElevated && !Services.Elevation.IsElevated &&
+            !args.Any(a => a.StartsWith("--", StringComparison.Ordinal)))
+        {
+            Services.SingleInstance.Release();     // 先让出单实例，否则提权后的进程会以为自己才是第二个
+            if (Services.Elevation.TryRestartElevated(out string elevateError))
+            {
+                Services.HotkeyManager.Log("restart elevated: new process started, this one exits");
+                return;
+            }
+            Services.HotkeyManager.Log("restart elevated failed: " + elevateError);
+            Services.SingleInstance.TryAcquire();  // 提权没成：把单实例拿回来，继续以普通权限跑
+        }
 
         // QA: force the 3D depth-ratio cap so the before/after of the projection can be compared.
         if (double.TryParse(Arg(args, "--depth"), out var depthRatio) && depthRatio > 0)
@@ -415,6 +447,22 @@ public static class Program
             var c3 = Count(dragged);
             report.Add($"drag 40 steps  avg={dragClock.Elapsed.TotalMilliseconds / 40:0.0} ms worst={worst:0.0} ms final white={c3.white} red={c3.red}");
             File.WriteAllLines(Path.Combine(tcDir, "text-color.txt"), report);
+            return;
+        }
+        if (args.Contains("--elevation-qa"))
+        {
+            // 只读自检：权限状态、启动器路径、单实例让出。不提权、不弹 UAC。
+            var report = new List<string>
+            {
+                $"process={Environment.ProcessPath}",
+                $"elevated={Services.Elevation.IsElevated}",
+                $"launcher={Services.Elevation.LauncherPath ?? "(none)"}",
+                $"dataDir={Services.AppPaths.DataDir}",
+                $"runElevatedSetting={settings.RunElevated}",
+            };
+            var target = Arg(args, "--report") ?? "elevation-qa.txt";
+            File.WriteAllLines(target, report);
+            app.Shutdown();
             return;
         }
         if (args.Contains("--key-qa"))
@@ -2355,6 +2403,61 @@ public static class Program
             RunRightMenu(app, args, settings);
             return;
         }
+        if (args.Contains("--resume-qa"))
+        {
+            // QA：验证「上次听到哪」的恢复链路 —— 装载但不播放，进度条位置要对上。
+            string dir = Arg(args, "--resume-qa") ?? ".";
+            Directory.CreateDirectory(dir);
+            var ctl = new PlayerController(settings);
+            var lines = new List<string>();
+            lines.Add($"settings: path='{settings.ResumeSongPath}' pos={settings.ResumePositionMs:0} playlist='{settings.ResumePlaylist}'");
+            RunBlocking(app, ctl.ShowLibraryAsync());
+            var target = ctl.Songs.FirstOrDefault(s => string.Equals(s.Path, settings.ResumeSongPath, StringComparison.OrdinalIgnoreCase));
+            lines.Add($"library={ctl.Songs.Count} found={target != null} title='{target?.DisplayTitle}'");
+            if (target != null)
+            {
+                ctl.PrepareResume(target, settings.ResumePositionMs);
+                for (int i = 0; i < 40; i++) PumpFrames(100);
+                lines.Add("debug: " + ctl.Playback.DebugLoad);
+                lines.Add($"after resume: current='{ctl.Current?.DisplayTitle}' playing={ctl.PlaybackState} " +
+                          $"position={ctl.Playback.PositionMs:0} duration={ctl.Current?.Duration.TotalMilliseconds:0} lyricLines={ctl.Lyrics?.Lines.Count ?? 0}");
+                // 关键回归：恢复之后按「播放」必须能接着放（用户报的就是这个）。
+                ctl.Toggle();
+                for (int i = 0; i < 15; i++) PumpFrames(100);
+                lines.Add($"after play press: playing={ctl.PlaybackState} position={ctl.Playback.PositionMs:0} {ctl.Playback.DebugLoad}");
+                for (int i = 0; i < 10; i++) PumpFrames(100);
+                lines.Add($"1 s later:        playing={ctl.PlaybackState} position={ctl.Playback.PositionMs:0} {ctl.Playback.DebugLoad}");
+                ctl.CaptureResume();
+                lines.Add($"captured back: path='{settings.ResumeSongPath}' pos={settings.ResumePositionMs:0} playlist='{settings.ResumePlaylist}'");
+            }
+            File.WriteAllLines(Path.Combine(dir, "resume.txt"), lines);
+            ctl.Dispose();
+            app.Shutdown();
+            return;
+        }
+        if (args.Contains("--tray-qa"))
+        {
+            // QA: 托盘图标在本机能不能建起来（PNG/ICO 加载、NotifyIcon 初始化），结果写文件。
+            string log = Arg(args, "--tray-log") ?? "tray-qa.txt";
+            string result;
+            Views.TrayIcon? tray = null;
+            try
+            {
+                tray = new Views.TrayIcon(() => { }, () => { });
+                result = "ok tray created";
+            }
+            catch (Exception ex)
+            {
+                result = "failed " + ex.GetType().Name + ": " + ex.Message;
+            }
+            finally
+            {
+                tray?.Dispose();
+            }
+            File.WriteAllText(log, result);
+            Console.WriteLine(result);
+            return;
+        }
         if (args.Contains("--ui-shot"))
         {
             RunUiShot(app, args, settings);
@@ -2816,7 +2919,10 @@ public static class Program
             Height = 460,
             Left = 420,
             Top = 260,
-            Topmost = true,
+            // --plain: an ordinary app window (not topmost). The old harness always used a topmost
+            // rival, which is why "turn the switch off" looked correct in QA while it was broken over
+            // every normal window on the user's desktop.
+            Topmost = !args.Contains("--plain"),
             ShowInTaskbar = true,
             Background = new SolidColorBrush(Color.FromRgb(0x2C, 0x7A, 0x46)),
         };
@@ -2830,7 +2936,7 @@ public static class Program
         var clock = System.Diagnostics.Stopwatch.StartNew();
         while (clock.ElapsedMilliseconds < ms)
         {
-            if (first || (every > 0 && clock.ElapsedMilliseconds % every < 300))
+            if (!args.Contains("--plain") && (first || (every > 0 && clock.ElapsedMilliseconds % every < 300)))
             {
                 NativeMethods.SetWindowPos(hwnd, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
                     NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
@@ -2895,11 +3001,12 @@ public static class Program
         System.Diagnostics.Process? rivalProcess = null;
         IntPtr rival = IntPtr.Zero;
 
-        IntPtr StartRival(int ms, int raiseEvery)
+        IntPtr StartRival(int ms, int raiseEvery, bool plain = false)
         {
             rivalProcess = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(exe)
             {
-                Arguments = $"--rival-window {ms} --title DariusRival --raise-every {raiseEvery}",
+                Arguments = $"--rival-window {ms} --title DariusRival --raise-every {raiseEvery}" +
+                            (plain ? " --plain" : ""),
                 UseShellExecute = false,
             });
             IntPtr found = IntPtr.Zero;
@@ -2984,6 +3091,27 @@ public static class Program
         lines.Add($"F switch-off 150 ms later: z(overlay)={zOff} z(rival)={zRivalOff} " +
                   $"dropped={immediateOff} topmost={overlay.Topmost}");
         lines.Add($"summary2: E_forced={forced} F_immediate_off={immediateOff}");
+
+        // G: the real-world case the harness used to miss — the window underneath is a NORMAL app
+        // window, not a topmost one. above=ON has to cover it; switching OFF has to drop behind it
+        // within 150 ms, with no other window change (no alt-tab, no screen refresh).
+        settings.OverlayAboveApps = true;
+        overlay.ApplySettings(settings);
+        PumpFrames(300);
+        int plainRivalMs = 9000;
+        rival = StartRival(plainRivalMs, 0, plain: true);
+        PumpFrames(1600);
+        var (zOnG, zPlainOn, _, _) = ZOrder(mine, rival);
+        bool coversPlain = zOnG >= 0 && zPlainOn >= 0 && zOnG < zPlainOn;
+        settings.OverlayAboveApps = false;
+        overlay.ApplySettings(settings);
+        PumpFrames(150);
+        var (zOffG, zPlainOff, _, _) = ZOrder(mine, rival);
+        bool droppedPlain = zOffG >= 0 && zPlainOff >= 0 && zOffG > zPlainOff;
+        lines.Add($"G plain rival: on z(overlay)={zOnG} z(plain)={zPlainOn} covers={coversPlain} | " +
+                  $"off+150ms z(overlay)={zOffG} z(plain)={zPlainOff} dropped={droppedPlain} | {overlay.DebugAboveState}");
+        lines.Add($"summary3: G_covers_plain={coversPlain} G_dropped_plain={droppedPlain}");
+        try { if (rivalProcess is { HasExited: false }) rivalProcess.Kill(); } catch { }
         Save(overlay, Path.Combine(dir, "above.png"));
         overlay.Close();
         File.WriteAllLines(Path.Combine(dir, "above.txt"), lines);
@@ -3159,6 +3287,33 @@ public static class Program
             SendChord(settings.KeyNext, "下一首");
             SendChord(settings.KeyPrevious, "上一首");
 
+        // ── 不在前台时：用户报的「这个应用没有在前台，快捷键优先级很低」 ──
+        // 自己开一个普通窗口当前台，再用真键盘事件打一遍。--key-unfocused 才跑；配合
+        // DARIUS_HOOKONLY=1（不注册 RegisterHotKey）才能证明「钩子单独就能扛住」。
+        if (args.Contains("--key-unfocused"))
+        {
+            var focusHolder = new Window
+            {
+                Title = "DariusFocusHolder",
+                Width = 420,
+                Height = 300,
+                Left = 80,
+                Top = 120,
+                WindowStartupLocation = WindowStartupLocation.Manual,
+                Background = new SolidColorBrush(Color.FromRgb(0x30, 0x3A, 0x50)),
+            };
+            focusHolder.Show();
+            focusHolder.Activate();
+            PumpFrames(700);
+            lines.Add($"--- 对手窗口当前台: mainFocused={win.IsActive} holderFocused={focusHolder.IsActive} " +
+                      $"{win.DebugHotkeys} ---");
+            SendChord(settings.KeyLyrics, "F8/桌面歌词(不在前台)");
+            SendChord(settings.KeyPlayPause, "Ctrl+P/播放暂停(不在前台)");
+            SendChord(settings.KeyNext, "下一首(不在前台)");
+            focusHolder.Close();
+            PumpFrames(200);
+        }
+
         // Deterministic half: post the exact message Windows posts for a registered hotkey. This cannot
             // be blocked by focus/UIPI, so it proves the hook → action chain (and that each chord fires ONCE).
         lines.Add("--- WM_HOTKEY 直达窗口 ---");
@@ -3171,6 +3326,19 @@ public static class Program
             lines.Add($"post {action}: enabled={settings.Enabled} above={settings.OverlayAboveApps} " +
                       $"playing={ctl.PlaybackState} cur='{ctl.Current?.Title}' " +
                       $"log=[{win.DebugHotkeys}]");
+        }
+        // 三条通路（RegisterHotKey / 低级钩子 / Raw Input + 轮询）各命中了几次：这是判断「游戏里按不动」
+        // 到底断在哪一环的唯一依据，所以直接抄进报告。
+        lines.Add("--- 通路计数 ---");
+        lines.Add(win.DebugHotkeys);
+        var hotkeyLog = Path.Combine(Services.AppPaths.DataDir, "hotkey.log");
+        if (File.Exists(hotkeyLog))
+        {
+            var fires = File.ReadAllLines(hotkeyLog)
+                .Where(l => l.Contains("FIRE action=") || l.Contains("fire-drop") || l.Contains("rawinput"))
+                .TakeLast(60).ToList();
+            lines.Add($"--- hotkey.log 末 {fires.Count} 行 ---");
+            lines.AddRange(fires);
         }
         File.WriteAllLines(Path.Combine(dir, "keyqa.txt"), lines);
         win.Close();

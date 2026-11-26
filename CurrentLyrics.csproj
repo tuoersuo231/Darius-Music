@@ -8,12 +8,14 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
+    <!-- 托盘图标用 WinForms 的 NotifyIcon：WPF 自己没有托盘 API。 -->
+    <UseWindowsForms>true</UseWindowsForms>
     <AssemblyName>Darius Music</AssemblyName>
     <RootNamespace>CurrentLyrics</RootNamespace>
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <StartupObject>CurrentLyrics.Program</StartupObject>
-    <Version>1.2.68</Version>
+    <Version>1.2.77</Version>
     <Product>Darius Music</Product>
     <AssemblyTitle>Darius Music</AssemblyTitle>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
@@ -21,6 +23,13 @@
          exe 旁边的 update-feed.txt（一行地址，# 开头是注释）。本仓库不内置任何地址。-->
     <UpdateFeedDefault Condition="'$(UpdateFeedDefault)' == ''"></UpdateFeedDefault>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- UseWindowsForms 会加一条 global using System.Windows.Forms，和 WPF 的 Panel/DragEventArgs/
+         KeyEventArgs 撞名；托盘代码里本来就用 System.Windows.Forms 全名，所以把这条隐式 using 去掉。 -->
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
 
   <ItemGroup>
     <AssemblyMetadata Include="UpdateFeed" Value="$(UpdateFeedDefault)" />

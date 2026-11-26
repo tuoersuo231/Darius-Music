@@ -40,9 +40,47 @@ public partial class HotkeyWindow : Window
         _onApply = onApply;
         BuildRows();
         Refresh();
+        chkAdmin.IsChecked = _settings.RunElevated;
+        txtAdmin.Text = Elevation.IsElevated ? "已以管理员权限运行" : "需要管理员权限";
         // One handler for the whole window: whichever element has focus, the next chord lands here.
         PreviewKeyDown += OnWindowKey;
         PreviewKeyUp += (_, e) => { if (_recording != null) e.Handled = true; };
+    }
+
+    /// <summary>
+    /// 游戏基本都以管理员权限运行；未提权时系统不会把热键投给低权限进程（UIPI），钩子也不会被调用。
+    /// 打开开关 = 保存设置 + 立刻以管理员权限重开（弹一次 UAC）；关掉 = 下次启动恢复普通权限。
+    /// </summary>
+    private void OnAdminToggle(object sender, RoutedEventArgs e)
+    {
+        bool want = chkAdmin.IsChecked == true;
+        _settings.RunElevated = want;
+        SettingsStore.Save(_settings);
+        if (!want)
+        {
+            txtAdmin.Text = Elevation.IsElevated ? "已以管理员权限运行" : "需要管理员权限";
+            txtStatus.Text = Elevation.IsElevated
+                ? "下次启动恢复普通权限。"
+                : "下次启动恢复普通权限；游戏里将收不到快捷键。";
+            return;
+        }
+        if (Elevation.IsElevated)
+        {
+            txtAdmin.Text = "已以管理员权限运行";
+            txtStatus.Text = "已经在管理员权限下运行。";
+            return;
+        }
+        if (!Elevation.TryRestartElevated(out string why))
+        {
+            _settings.RunElevated = false;
+            SettingsStore.Save(_settings);
+            chkAdmin.IsChecked = false;
+            txtStatus.Text = why;
+            return;
+        }
+        // 新的管理员进程已经起来：本进程必须真退出，否则两个实例会抢同一批热键。
+        if (Owner is MainWindow main) main.ForceExit();
+        else Application.Current.Shutdown();
     }
 
     /// <summary>Current text for an action, as stored in settings.</summary>

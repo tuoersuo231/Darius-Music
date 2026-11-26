@@ -292,7 +292,8 @@ public sealed class PlayerController : IDisposable
         int generation = BeginView();
         IsOnlineView = true;
         OnlineKeyword = keyword;
-        _activePlaylist = null;
+        _activePlaylist = null;
+        ActivePlaylistName = "";
         Busy = true;
         ViewName = "在线搜索";
         ViewSubtitle = keyword.Length == 0 ? "输入歌名、歌手或专辑后回车搜索" : $"正在搜索「{keyword}」…";
@@ -329,6 +330,7 @@ public sealed class PlayerController : IDisposable
     {
         int generation = BeginView();
         _activePlaylist = playlist;
+        ActivePlaylistName = playlist.Name;
         ViewName = playlist.Name;
         Busy = true;
         ViewSubtitle = "正在读取歌单 …";
@@ -500,7 +502,8 @@ public sealed class PlayerController : IDisposable
     private async Task ShowFilesAsync(IReadOnlyList<string> files, bool keepList)
     {
         int generation = BeginView();
-        _activePlaylist = null;
+        _activePlaylist = null;
+        ActivePlaylistName = "";
         Busy = true;
         ViewName = "本地音乐";
         ViewSubtitle = $"正在读取 {files.Count} 个文件 …";
@@ -533,7 +536,8 @@ public sealed class PlayerController : IDisposable
     {
         if (string.IsNullOrWhiteSpace(folder) || !System.IO.Directory.Exists(folder)) return;
         int generation = BeginView();
-        _activePlaylist = null;
+        _activePlaylist = null;
+        ActivePlaylistName = "";
         Busy = true;
         ViewSubtitle = "正在扫描本地文件夹 …";
         ViewChanged?.Invoke();
@@ -626,6 +630,52 @@ public sealed class PlayerController : IDisposable
     }
 
     // ---------- playback ----------
+    // ---------- 上次听到哪（只认本地文件，在线曲目不记） ----------
+    /// <summary>退出前记一笔：当前歌 + 进度 + 所在歌单。在线曲目不记（下次也没法直接放）。</summary>
+    public void CaptureResume()
+    {
+        var song = Current;
+        if (song == null || song.Source != SongSource.Local || string.IsNullOrWhiteSpace(song.Path))
+        {
+            Settings.ResumeSongPath = "";
+            Settings.ResumePositionMs = 0;
+            Settings.ResumePlaylist = "";
+            return;
+        }
+        double ms = Playback.PositionMs;
+        // 停在结尾几秒的算“听完了”，下次从这首歌开头开始，免得一进来就卡在末尾。
+        if (song.Duration.TotalMilliseconds > 5000 && ms > song.Duration.TotalMilliseconds - 3000) ms = 0;
+        Settings.ResumeSongPath = song.Path;
+        Settings.ResumePositionMs = Math.Max(0, ms);
+        Settings.ResumePlaylist = ActivePlaylistName ?? "";
+    }
+
+    /// <summary>上次那个歌单名（空 = 本地音乐）。</summary>
+    public string ActivePlaylistName { get; private set; } = "";
+
+    /// <summary>
+    /// 「上次听到一半」的恢复：把歌放进 Current（标题/封面/歌词都跟着走），把媒体装载但不播放，
+    /// 并把进度条推到上次的位置。整个流程不弹任何窗口。
+    /// </summary>
+    public void PrepareResume(Song song, double positionMs)
+    {
+        _playCts?.Cancel();
+        Current = song;
+        foreach (var item in Songs) item.IsCurrent = ReferenceEquals(item, song);
+        RequestCover(song);
+        Lyrics = null;
+        IsTrial = false;
+        Notice = null;
+        TrackChanged?.Invoke();
+        if (song.Source == SongSource.Local && !string.IsNullOrWhiteSpace(song.Path) && System.IO.File.Exists(song.Path))
+        {
+            Playback.Open(song, null, autoplay: false);   // 装载，不出声
+            Playback.SeekTo(positionMs);
+        }
+        _ = LoadLyricsAsync(song);
+        StateChanged?.Invoke();
+    }
+
     /// <summary>Preview/QA: show a lyric document without a media source.</summary>
     public void LoadDemo(LyricDocument document, Song song)
     {

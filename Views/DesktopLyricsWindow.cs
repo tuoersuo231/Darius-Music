@@ -375,9 +375,32 @@ public sealed class DesktopLyricsWindow : Window
         bool above = _settings.OverlayAboveApps && _settings.BackdropMode == BackdropMode.Transparent;
         Topmost = above;
         if (above) RaiseAbove();
+        else SinkBelowOthers();
         SetForegroundHook(above);
         SetAboveWatchdog(above);
     }
+
+    /// <summary>
+    /// The OFF direction has to move the window, not just clear WS_EX_TOPMOST: <c>Topmost = false</c>
+    /// sends HWND_NOTOPMOST, which parks the window at the TOP of the non-topmost band — still covering
+    /// every normal app, so the switch looked dead until something else re-stacked the screen (user
+    /// report: 关闭时无法及时生效，要刷新整个屏幕). Sinking to HWND_BOTTOM makes other windows cover the
+    /// lyrics immediately; the desktop is still behind it, so they stay visible on an empty desktop.
+    /// </summary>
+    private void SinkBelowOthers()
+    {
+        // QA A/B: DARIUS_NOSINK=1 keeps the old behaviour (only clear WS_EX_TOPMOST) so the difference
+        // can be measured on the same binary — that old behaviour is the reported bug.
+        if (Environment.GetEnvironmentVariable("DARIUS_NOSINK") == "1") return;
+        var hwnd = new WindowInteropHelper(this).Handle;
+        if (hwnd == IntPtr.Zero) return;
+        NativeMethods.SetWindowPos(hwnd, NativeMethods.HWND_BOTTOM, 0, 0, 0, 0,
+            NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE |
+            NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_NOOWNERZORDER);
+        _sinkCount++;
+    }
+
+    private int _sinkCount;
 
     private void RaiseAbove()
     {
@@ -404,7 +427,7 @@ public sealed class DesktopLyricsWindow : Window
     /// <summary>QA (--above-qa): how often the overlay actually asked to be put on top, how often it
     /// stood down because one of our own windows was active, and the last Win32 error.</summary>
     public string DebugAboveState =>
-        $"raises={_raiseCount} skipped={_raiseSkipped} err={_raiseError} " +
+        $"raises={_raiseCount} skipped={_raiseSkipped} err={_raiseError} sinks={_sinkCount} " +
         $"hook={(_foregroundHook != IntPtr.Zero)} watchdog={(_aboveWatchdogTimer != null)} " +
         $"visible={IsVisible} topmost={Topmost}";
 

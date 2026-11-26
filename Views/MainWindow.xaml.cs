@@ -117,8 +117,12 @@ public partial class MainWindow : Window
             // process (and a frozen lyric frame) alive.
             try
             {
+                // 记住「上次听到哪」，下次启动在后台恢复（只记本地文件）。
+                _player.CaptureResume();
                 // The settings save is debounced while a slider is dragged; flush it before exit.
                 Services.SettingsStore.Save(_settings);
+                _tray?.Dispose();
+                _tray = null;
                 _desktop?.Close();
                 _settingsWindow?.Close();
                 _downloadWindow?.Close();
@@ -130,6 +134,75 @@ public partial class MainWindow : Window
                 Application.Current.Shutdown();
             }
         };
+
+        // Logging off / shutting Windows down must not be blocked by the minimize-on-close rule.
+        Application.Current.SessionEnding += (_, _) => _forceExit = true;
+    }
+
+    /// <summary>True once something really wants the process gone (update restart, session end).</summary>
+    private bool _forceExit;
+
+    private TrayIcon? _tray;
+
+    /// <summary>托盘图标：关窗口以后程序还在，得让用户看得见、也能从这里退出。</summary>
+    private void EnsureTray()
+    {
+        if (_tray != null) return;
+        try
+        {
+            _tray = new TrayIcon(ShowFromTray, ExitFromTray);
+        }
+        catch (Exception ex)
+        {
+            // 托盘建不起来也不能让「关窗口」变成崩溃：退回最小化，至少程序还在。
+            _trayError = ex.GetType().Name + ": " + ex.Message;
+        }
+    }
+
+    private string _trayError = "";
+
+    private void ShowFromTray()
+    {
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            Show();
+            if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+            Activate();
+            Topmost = Topmost;      // nudge it in front of the窗口 that was covering it
+            UpdateOverlayForFocus();
+        }));
+    }
+
+    private void ExitFromTray()
+    {
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            _forceExit = true;
+            Close();
+        }));
+    }
+
+    /// <summary>真退出，绕过「关闭窗口最小化」（换权限重启、托盘「退出」都走这里）。</summary>
+    public void ForceExit()
+    {
+        _forceExit = true;
+        Application.Current.Shutdown();
+    }
+
+    /// <summary>关闭窗口在默认设置下只是缩到任务栏：歌继续放，桌面歌词也照旧。
+    /// 界面外观 →「关闭窗口时最小化到任务栏」可以关掉，关掉就是真退出（老行为）。</summary>
+    protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
+    {
+        if (!_forceExit && _settings.MinimizeOnClose)
+        {
+            e.Cancel = true;
+            EnsureTray();
+            if (_tray != null) Hide();                 // 缩到托盘：任务栏按钮也收起来，只剩右下角图标
+            else WindowState = WindowState.Minimized;  // 托盘没起来就退回最小化
+            _tray?.ShowFirstHint();
+            return;
+        }
+        base.OnClosing(e);
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
@@ -166,6 +239,43 @@ public partial class MainWindow : Window
         // Local library only: no account, no WSA.
         try { await _player.ShowLibraryAsync(); }
         catch { }
+        // 上次听着的那首歌：同一套界面里把歌、歌单、进度条放回原位，不弹任何窗口。
+        TryRestoreLastSession();
+    }
+
+    /// <summary>
+    /// 恢复上次的会话：先切回当时那个歌单，再把歌放进播放条、把进度条推上次的位置（暂停状态，
+    /// 不自动播放）。整段在后台完成；文件不在了就静默跳过。
+    /// </summary>
+    private async void TryRestoreLastSession()
+    {
+        try
+        {
+            var path = (_settings.ResumeSongPath ?? "").Trim();
+            if (path.Length == 0 || !System.IO.File.Exists(path)) return;
+            var playlistName = (_settings.ResumePlaylist ?? "").Trim();
+            if (playlistName.Length > 0)
+            {
+                var playlist = _player.Playlists.FirstOrDefault(p =>
+                    string.Equals(p.Name, playlistName, StringComparison.OrdinalIgnoreCase));
+                if (playlist != null && !ReferenceEquals(_player.Playlists, null))
+                    await _player.ShowPlaylistAsync(playlist);
+            }
+            if (_player.Songs.Count == 0) await _player.ShowLibraryAsync();
+            var song = _player.Songs.FirstOrDefault(s => string.Equals(s.Path, path, StringComparison.OrdinalIgnoreCase));
+            if (song == null)
+            {
+                var name = System.IO.Path.GetFileName(path);
+                song = _player.Songs.FirstOrDefault(s =>
+                    string.Equals(System.IO.Path.GetFileName(s.Path), name, StringComparison.OrdinalIgnoreCase));
+            }
+            if (song == null) return;
+            _player.PrepareResume(song, _settings.ResumePositionMs);
+            var seconds = Math.Clamp(_settings.ResumePositionMs / 1000.0, 0, Math.Max(0, sldProgress.Maximum));
+            sldProgress.Value = seconds;
+            txtPos.Text = TimeSpan.FromSeconds(seconds).ToString(seconds >= 3600 ? @"h\:mm\:ss" : @"m\:ss");
+        }
+        catch { }
     }
 
     private void OnWindowPreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
@@ -197,6 +307,7 @@ public partial class MainWindow : Window
     /// <summary>One place where a hotkey turns into the same call a button would make.</summary>
     private void OnHotkey(HotkeyAction action)
     {
+        Services.HotkeyManager.Log($"ACTION {action} active={IsActive}");
         try
         {
             switch (action)
@@ -315,7 +426,7 @@ public partial class MainWindow : Window
     /// <summary>QA (--key-qa): registration state plus every action that actually fired, so a hotkey
     /// that is bound but silent can be told apart from one that never reaches the app.</summary>
     public string DebugHotkeys =>
-        $"registered={_hotkeys.RegisteredCount} failed={_hotkeys.Failed.Count} " +
+        $"registered={_hotkeys.RegisteredCount} failed={_hotkeys.Failed.Count} {_hotkeys.HookState} " +
         $"hwnd={_hotkeys.Handle} hookCalls={_hotkeys.HookCalls} msgs=[{string.Join(";", _hotkeys.MessageLog.TakeLast(4))}] " +
         $"codes=[{string.Join(",", _hotkeys.FailCodes.Select(kv => $"{kv.Key}={kv.Value}"))}] " +
         $"keys=[{_hotkeys.LastLocalKey}] log=[{string.Join(" | ", _hotkeyLog)}]";
@@ -430,7 +541,13 @@ public partial class MainWindow : Window
             SettingsStore.Save(_settings);
             return ApplyHotkeys();
         }) { Owner = this };
-        _hotkeyWindow.Closed += (_, _) => _hotkeyWindow = null;
+        // While the page is recording, the keyboard hook must not eat the keys being captured.
+        _hotkeys.HookEnabled = false;
+        _hotkeyWindow.Closed += (_, _) =>
+        {
+            _hotkeys.HookEnabled = true;
+            _hotkeyWindow = null;
+        };
         _hotkeyWindow.Show();
     }
 
@@ -2390,6 +2507,7 @@ public partial class MainWindow : Window
                 txtUpdateHint.Text = $"正在重启到 {installed}…";
                 var launcher = Services.Layout.LauncherPath;
                 if (System.IO.File.Exists(launcher)) System.Diagnostics.Process.Start(launcher);
+                _forceExit = true;
                 Application.Current.Shutdown();
                 return;
             }
@@ -2398,6 +2516,7 @@ public partial class MainWindow : Window
             var zip = await Services.UpdateService.FetchAsync(feed, manifest, progress);
             txtUpdateHint.Text = "正在重启更新…";
             Services.UpdateService.ApplyAndRestart(zip);
+            _forceExit = true;
             Application.Current.Shutdown();
         }
         catch (Exception ex)

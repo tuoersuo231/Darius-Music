@@ -63,6 +63,18 @@
                 <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="14" Padding="18,14" BorderBrush="{DynamicResource HairlineBrush}" BorderThickness="1" Margin="0,12,0,0">
                     <StackPanel>
                         <Grid>
+                            <TextBlock Text="关闭窗口时缩到托盘" FontSize="13" VerticalAlignment="Center" />
+                            <CheckBox x:Name="chkMinimizeOnClose" Style="{StaticResource Switch}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                        </Grid>
+                        <!-- 开了上面那个开关以后，标题栏的 ✕ 只会缩到任务栏；真正退出留这一个入口。 -->
+                        <Button x:Name="btnQuit" Content="退出程序" Style="{StaticResource GhostButton}" Padding="10,3" FontSize="12"
+                                HorizontalAlignment="Right" Margin="0,12,0,0" Click="OnQuit" />
+                    </StackPanel>
+                </Border>
+
+                <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="14" Padding="18,14" BorderBrush="{DynamicResource HairlineBrush}" BorderThickness="1" Margin="0,12,0,0">
+                    <StackPanel>
+                        <Grid>
                             <TextBlock Text="版本" FontSize="13" VerticalAlignment="Center" />
                             <TextBlock x:Name="txtVersion" Text="1.0.0" Style="{StaticResource Caption}" HorizontalAlignment="Right" VerticalAlignment="Center" />
                         </Grid>

@@ -130,6 +130,22 @@ public sealed class AppSettings
     public bool AutoImportWsa { get; set; } = true;
     public bool ShowOnStartup { get; set; } = true;
 
+    /// <summary>关闭主窗口时缩到任务栏、继续放歌，而不是退出。界面外观里有开关；默认开。</summary>
+    public bool MinimizeOnClose { get; set; } = true;
+
+    /// <summary>以管理员权限运行。游戏基本都以管理员权限启动，未提权的进程在它前台时收不到全局热键、
+    /// 低级键盘钩子也不会被调用（UIPI）——这就是「普通应用能按、游戏里按不动」的原因。打开后下次
+    /// 启动由启动器提权重开（弹一次 UAC）。快捷键页有开关，默认关。</summary>
+    public bool RunElevated { get; set; }
+
+    // ---- 上次退出时正在听的歌（只记本地文件；在线曲目不记）----
+    /// <summary>本地歌曲的完整路径；空 = 没有可恢复的会话。</summary>
+    public string ResumeSongPath { get; set; } = "";
+    /// <summary>上次听到的位置（毫秒），下次启动把进度条放回这里。</summary>
+    public double ResumePositionMs { get; set; }
+    /// <summary>当时在哪个歌单里听的（空 = 本地音乐）；启动时先切回那个歌单再定位歌曲。</summary>
+    public string ResumePlaylist { get; set; } = "";
+
     /// <summary>NetEase cookie pasted from a browser (MUSIC_U=...). Empty means anonymous, which
     /// still searches and plays free tracks, but drops lossless and VIP-only ones.</summary>
     public string NeteaseCookie { get; set; } = "";
@@ -284,6 +300,12 @@ public sealed class AppSettings
         WsaSerial = string.IsNullOrWhiteSpace(WsaSerial) ? "127.0.0.1:58526" : WsaSerial,
         AutoImportWsa = AutoImportWsa,
         ShowOnStartup = ShowOnStartup,
+        // 新字段必须写进 Normalized()：它每次 Load/Save 都跑，漏一个就等于「改了立刻被写回默认值」。
+        MinimizeOnClose = MinimizeOnClose,
+        RunElevated = RunElevated,
+        ResumeSongPath = ResumeSongPath ?? "",
+        ResumePositionMs = double.IsFinite(ResumePositionMs) ? Math.Clamp(ResumePositionMs, 0, 24 * 3600 * 1000.0) : 0,
+        ResumePlaylist = ResumePlaylist ?? "",
         // These four were added later and were missing here, so every launch silently reset the
         // NetEase cookie/quality back to defaults (Normalized() rebuilds a fresh instance).
         NeteaseCookie = NeteaseCookie ?? "",

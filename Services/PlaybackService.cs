@@ -47,6 +47,8 @@ public sealed class PlaybackService : IDisposable
         {
             _opened = true;
             var duration = _player.PlaybackSession.NaturalDuration;
+            if (_pendingSeekMs > 0) ApplyPendingSeek();
+            if (_pendingPlay) { _pendingPlay = false; Play(); }
             if (Current != null && duration > TimeSpan.Zero) Current.Duration = duration;
             // A reused MediaPlayer keeps the outgoing session's position, so the next local file
             // opened straight after one that played to its end started *at its own end*: the bar was
@@ -118,6 +120,65 @@ public sealed class PlaybackService : IDisposable
             var total = DurationMs;
             return total > 0 ? Math.Clamp(ms, 0, total) : Math.Max(0, ms);
         }
+    }
+
+    private double _pendingSeekMs;
+    private bool _pendingPlay;
+
+    /// <summary>
+    /// MediaPlayer 在「打开后从没播放过」的暂停态里会**静默忽略** Position 赋值（实测 session 一直是 0）。
+    /// 所以恢复进度要这样跳：先把音量压到 0、播一帧、再写 Position、立刻暂停、最后把音量放回去 ——
+    /// 用户听不到任何声音，看到的却是上次那个位置。
+    /// </summary>
+    private void ApplyPendingSeek()
+    {
+        if (_pendingSeekMs <= 0) return;
+        double target = _pendingSeekMs;
+        _pendingSeekMs = 0;
+        double volume = _player.Volume;
+        try { _player.Volume = 0; _player.Play(); } catch { }
+        int attempts = 0;
+        var timer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(180) };
+        timer.Tick += (_, _) =>
+        {
+            double now;
+            try { now = _player.PlaybackSession.Position.TotalMilliseconds; }
+            catch { now = -1; }
+            if (Math.Abs(now - target) < 1200 || ++attempts >= 3)
+            {
+                timer.Stop();
+                try { _player.Pause(); } catch { }
+                _playing = false;
+                _anchorMs = target;
+                _watch.Restart();
+                try { _player.Volume = volume; } catch { }
+                StateChanged?.Invoke();
+                return;
+            }
+            try { _player.PlaybackSession.Position = TimeSpan.FromMilliseconds(target); } catch { }
+        };
+        timer.Start();
+    }
+
+    /// <summary>QA: 装载/跳转的中间状态，用来判断「恢复进度」到底卡在哪一步。</summary>
+    public string DebugLoad
+    {
+        get
+        {
+            string session = "?";
+            try { session = $"session={_player.PlaybackSession.Position.TotalMilliseconds:0} state={_player.PlaybackSession.PlaybackState}"; }
+            catch (Exception ex) { session = "session-err " + ex.GetType().Name; }
+            return $"opened={_opened} playing={_playing} anchor={_anchorMs:0} pending={_pendingSeekMs:0} {session}";
+        }
+    }
+
+    /// <summary>想跳到某个位置，但媒体可能还没打开：排队到 MediaOpened 里再执行。
+    /// 用于「上次听到一半」的恢复 —— 装载但不自动播放，位置照样在。</summary>
+    public void SeekTo(double ms)
+    {
+        if (ms <= 50) return;
+        _pendingSeekMs = ms;
+        if (_opened) { _pendingSeekMs = 0; Seek(ms); }
     }
 
     /// <summary>Opens a stream URL or a local file and starts buffering/playing.</summary>
@@ -210,6 +271,15 @@ public sealed class PlaybackService : IDisposable
     public void Play()
     {
         if (Current == null) return;
+        // 恢复的会话只装载不播放：如果这一步因为任何原因没打开成功（或 Source 被清掉），
+        // 直接 Play() 会毫无反应（用户报的「播放键按了没动静」）。这里补一次装载，开好再播。
+        if (!_opened)
+        {
+            _pendingPlay = true;
+            if (_player.Source == null) Open(Current, null, autoplay: false);
+            else _player.Play();
+            return;
+        }
         if (DurationMs > 0 && PositionMs >= DurationMs - 80) Seek(0);
         _player.Play();
         _playing = true;
