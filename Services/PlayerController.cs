@@ -1057,6 +1057,22 @@ public sealed class PlayerController : IDisposable
         catch { }
     }
 
+    /// <summary>Why a word-level upgrade or a local-align result never reached the screen. These paths
+    /// used to end in a bare <c>catch { }</c>, which is why "在线歌没有逐字" could not be diagnosed
+    /// from the log at all.</summary>
+    private static void LogFailure(long cloudId, Song song, string stage, Exception error)
+    {
+        try
+        {
+            var path = Path.Combine(AppPaths.DataDir, "lyrics.log");
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.AppendAllText(path,
+                $"{DateTime.Now:MM-dd HH:mm:ss} {stage}-FAILED id={cloudId} '{song.DisplayTitle}' " +
+                $"{error.GetType().Name}: {error.Message}{Environment.NewLine}");
+        }
+        catch { }
+    }
+
     /// <summary>NeteaseDownload names saved tracks `"title - artist [id].ext"`; recover that id so a
     /// downloaded track can still ask for the word-level lyric it was downloaded without.</summary>
     /// <summary>Cheap identity check between a local sidecar and a fetched document. Compares whole
@@ -1087,9 +1103,9 @@ public sealed class PlayerController : IDisposable
     /// <summary>QA hook: run the lyric chain for one cloud row exactly as playback would, off the UI
     /// thread (the chain awaits, so calling it on the dispatcher would deadlock). The word-level
     /// upgrade runs in the background in normal use, so the hook waits for it to keep QA deterministic.</summary>
-    internal LyricDocument? DebugLoadLyrics(Song song)
+    internal LyricDocument? DebugLoadLyrics(Song song, bool waitForWordLevel = true)
     {
-        _waitForWordLevel = true;
+        _waitForWordLevel = waitForWordLevel;
         try
         {
             Current = song;
@@ -1213,11 +1229,21 @@ public sealed class PlayerController : IDisposable
                 ScheduleLocalAlign(cloudId, song, baseDoc);
                 return;
             }
-            if (!ReferenceEquals(Current, song)) return;
-            Lyrics = LrcParser.WithOpeningCard(doc, song.DisplayTitle, song.DisplayArtist, song.Album);
+            if (!ReferenceEquals(Current, song))
+            {
+                LogApplied(song, cloudId, null, "upgrade-skipped-track-changed");
+                return;
+            }
+            // 这条路径是"先显示均分、几秒后热替换成逐字"，替换有没有落到界面上以前完全没有记录。
+            var upgraded = LrcParser.WithOpeningCard(doc, song.DisplayTitle, song.DisplayArtist, song.Album);
+            Lyrics = upgraded;
             LyricsChanged?.Invoke();
+            LogApplied(song, cloudId, upgraded, "upgrade");
         }
-        catch { }
+        catch (Exception e)
+        {
+            LogFailure(cloudId, song, "upgrade", e);
+        }
     }
 
     /// <summary>
@@ -1236,7 +1262,10 @@ public sealed class PlayerController : IDisposable
                 LyricsChanged?.Invoke();
                 LogApplied(song, cloudId, aligned, "align");
             }
-            catch { }
+            catch (Exception e)
+            {
+                LogFailure(cloudId, song, "align-apply", e);
+            }
         });
     }
 

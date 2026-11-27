@@ -3802,10 +3802,22 @@ public static class Program
                       $"dur={(int)song.Duration.TotalSeconds}s");
             lines.Add($"dataDir={Services.AppPaths.DataDir} alignAvailable={Services.LocalAlign.Available}");
             var ctl = new Services.PlayerController(settings);
+            // --async：按正常播放的节奏跑 —— 只等网易云那一份，词级替换交给后台任务，
+            // 然后在这里等它落地，这样就能验证热替换这条以前完全没有日志的路径。
+            bool async = args.Contains("--async");
             foreach (var pass in new[] { "first", "again" })
             {
                 var watch = System.Diagnostics.Stopwatch.StartNew();
-                var doc = Task.Run(() => ctl.DebugLoadLyrics(song)).GetAwaiter().GetResult();
+                var doc = Task.Run(() => ctl.DebugLoadLyrics(song, !async)).GetAwaiter().GetResult();
+                if (async)
+                {
+                    for (int i = 0; i < 80; i++)
+                    {
+                        if (ctl.Lyrics != null && ctl.Lyrics.Lines.Any(l => l.HasWordTiming)) break;
+                        System.Threading.Thread.Sleep(250);
+                    }
+                    doc = ctl.Lyrics;
+                }
                 watch.Stop();
                 if (doc == null)
                 {
