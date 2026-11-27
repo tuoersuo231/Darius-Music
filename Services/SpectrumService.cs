@@ -154,9 +154,9 @@ public sealed class SpectrumService : IDisposable
             }
             // 高频天生比低频弱 20~30 dB，按条号补回来（每条约 +0.8 dB），否则右边一半永远是 0。
             loudest *= Math.Pow(1.14, bar);
-            // 对数压动态范围。常数按实测：低频条 log10≈-2.9、高频条≈-4.0，
-            // 落在 -4.2..-2.5 这段，所以下限 -4.2、跨度 1.7。
-            float value = (float)Math.Clamp((Math.Log10(loudest + 1e-9) + 4.2) / 1.7, 0, 1);
+            // 对数压动态范围。实测低频条 log10≈-2.9、高频条≈-4.0；这组常数让典型值落在
+            // 0.35~0.7，留出上下空间 —— 之前 /1.7 太陡，几乎每根都顶到 1，看着像一排方块。
+            float value = (float)Math.Clamp((Math.Log10(loudest + 1e-9) + 4.6) / 2.6, 0, 1);
             if (value > peak) peak = value;
 
             _fast[bar] = Math.Max(value, _fast[bar] - FastDecay);

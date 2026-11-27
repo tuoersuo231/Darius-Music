@@ -6086,7 +6086,7 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
         app.Dispatcher.Invoke(() => { }, DispatcherPriority.Background);
         Save(main, Path.Combine(dir, "main.png"));
         File.WriteAllText(Path.Combine(dir, "layout.txt"), main.DebugLayout());
-        if (main.FindName("homeSpectrum") is Controls.SpectrumView homeSpectrum)
+        if (main.FindName("bottomSpectrum") is Controls.SpectrumView homeSpectrum)
             File.AppendAllText(Path.Combine(dir, "layout.txt"),
                 Environment.NewLine + "spectrum: " + homeSpectrum.DebugState);
 

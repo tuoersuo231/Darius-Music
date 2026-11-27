@@ -13,8 +13,12 @@
       <ColumnDefinition Width="252" />
       <ColumnDefinition Width="*" />
     </Grid.ColumnDefinitions>
+    <Grid.RowDefinitions>
+      <RowDefinition Height="*" />
+      <RowDefinition Height="Auto" />
+    </Grid.RowDefinitions>
     <Grid.Children>
-      <Grid x:Name="themeBackdrop" Grid.ColumnSpan="2" ClipToBounds="True" IsHitTestVisible="False">
+      <Grid x:Name="themeBackdrop" Grid.ColumnSpan="2" Grid.RowSpan="2" ClipToBounds="True" IsHitTestVisible="False">
         <Grid.Children>
           <Image x:Name="themeImage" Stretch="UniformToFill" HorizontalAlignment="Center" VerticalAlignment="Center" />
         </Grid.Children>
@@ -452,16 +456,11 @@
           </Border>
           <!-- No gap above the player bar: the 12 DIP strip used to show the raw (bright) cover
                backdrop through it, which read as a missing block under the song list. -->
-          <Border Grid.Row="2" Height="126" Margin="0" Background="{DynamicResource CardBrush}">
+          <Border Grid.Row="2" Height="92" Margin="0" Background="{DynamicResource CardBrush}">
             <Border.Child>
               <Grid>
-                <Grid.RowDefinitions>
-                  <RowDefinition Height="Auto" />
-                  <RowDefinition Height="*" />
-                </Grid.RowDefinitions>
                 <Grid.Children>
-                  <ctl:SpectrumView x:Name="homeSpectrum" Grid.Row="0" Height="32" Margin="24,4,24,0" Opacity="0.8" />
-                  <Grid x:Name="playerBar" Grid.Row="1" MouseLeftButtonUp="OnPlayerBarClick" Margin="24,0,24,0" Background="#00FFFFFF">
+                  <Grid x:Name="playerBar" MouseLeftButtonUp="OnPlayerBarClick" Margin="24,0,24,0" Background="#00FFFFFF">
                     <Grid.RowDefinitions>
                       <RowDefinition Height="*" />
                       <RowDefinition Height="Auto" />
@@ -554,6 +553,11 @@
         </Grid.Children>
       </Grid>
       <Grid x:Name="playerPage" Grid.ColumnSpan="2" Visibility="Collapsed" Panel.ZIndex="10" />
+      <!-- 窗口最底边整条频谱：横跨侧边栏和主区，播放页也让出这一行（它在 Row 0）。
+           SpectrumView 是 FrameworkElement 没有 Background，所以用 Border 兜底。 -->
+      <Border Grid.Row="1" Grid.ColumnSpan="2" Height="72" Background="{DynamicResource CardBrush}">
+        <ctl:SpectrumView x:Name="bottomSpectrum" />
+      </Border>
     </Grid.Children>
   </Grid>
 </Window>
