@@ -213,6 +213,7 @@ public partial class MainWindow : Window
         if (txtUpdateHint != null) txtUpdateHint.Text = "v" + Services.UpdateService.CurrentVersion;
         SetLyricsCheckbox(_settings.Enabled);
         btnPlayAll.IsEnabled = false;
+        ApplySpectrumLayer();
         ApplyAppearance();
 
         if (_settings.Enabled)
@@ -2439,6 +2440,39 @@ public partial class MainWindow : Window
     public NowPlayingView? PlayerView => _nowPlayingView;
     public string DebugPlayerPageState() =>
         $"visible={playerPage.Visibility} view={(_nowPlayingView != null)} children={playerPage.Children.Count}";
+
+    /// <summary>
+    /// 按 spectrum.json 的 Layer 决定频谱挂在哪一层：
+    /// <c>overlay</c> → 根 Grid 的最上层（ZIndex 5，播放页 10 仍在它上面），贴窗底、不参与布局；
+    /// <c>backdrop</c> → 塞进壁纸层 themeBackdrop，夹在壁纸和面板中间。
+    /// </summary>
+    private void ApplySpectrumLayer()
+    {
+        if (bottomSpectrum == null) return;
+        bool backdrop = Services.SpectrumOptions.Current.IsBackdrop;
+        var host = backdrop ? (Panel)themeBackdrop : rootGrid;
+        if (ReferenceEquals(bottomSpectrum.Parent, host)) return;
+        if (bottomSpectrum.Parent is Panel old) old.Children.Remove(bottomSpectrum);
+        bottomSpectrum.VerticalAlignment = VerticalAlignment.Bottom;
+        bottomSpectrum.HorizontalAlignment = HorizontalAlignment.Stretch;
+        if (backdrop)
+        {
+            Panel.SetZIndex(bottomSpectrum, 0);
+            themeBackdrop.Children.Add(bottomSpectrum);
+        }
+        else
+        {
+            Panel.SetZIndex(bottomSpectrum, 5);
+            rootGrid.Children.Add(bottomSpectrum);
+        }
+    }
+
+    /// <summary>QA：把当前频谱挂载位置报出来（overlay / backdrop / 无父级）。</summary>
+    internal string DebugSpectrumLayer()
+    {
+        var parent = bottomSpectrum?.Parent as FrameworkElement;
+        return parent == null ? "none" : (ReferenceEquals(parent, themeBackdrop) ? "backdrop" : parent.Name);
+    }
 
     /// <summary>QA: switch the themed window backdrop on or off, so the resize cost of the full-window
     /// blur can be measured on its own.</summary>

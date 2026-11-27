@@ -8,7 +8,7 @@
         FontFamily="{StaticResource UiFont}"
         Foreground="{DynamicResource TextBrush}"
         Loaded="OnLoaded">
-  <Grid>
+  <Grid x:Name="rootGrid">
     <Grid.ColumnDefinitions>
       <ColumnDefinition Width="252" />
       <ColumnDefinition Width="*" />

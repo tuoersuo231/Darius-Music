@@ -1,3 +1,4 @@
+using NAudio.CoreAudioApi;
 using NAudio.Dsp;
 using NAudio.Wave;
 
@@ -27,7 +28,23 @@ public sealed class SpectrumService : IDisposable
     private float _fastDecay = 1f;
     private float _slowDecay = 1f;
 
-    private WasapiLoopbackCapture? _capture;
+    /// <summary>
+    /// 一路回环。机器上经常不止一个活动的输出设备（内置声卡 + USB 音箱 + 耳机），
+    /// 而 Windows 11 允许把某个程序的输出单独指到其中某一个 —— 只抓"默认设备"的话，
+    /// 程序自己播的歌可能根本不在那上面，频谱会一直是 0。
+    /// 所以每块声卡都抓，只用当前最响的那一路喂 FFT。
+    /// </summary>
+    private sealed class Tap
+    {
+        public WasapiLoopbackCapture Capture = null!;
+        public WaveFormat Format = null!;
+        public string Name = "";
+        public string Error = "";
+        public double Energy;
+    }
+
+    private readonly List<Tap> _taps = new();
+    private Tap? _active;
     private WaveFormat? _format;
     private double _sampleRate = 48000;
     private long _frames;
@@ -39,7 +56,24 @@ public sealed class SpectrumService : IDisposable
     /// <summary>条数（= 数组长度）。设置里改过 Bars 之后由 <see cref="Configure"/> 重新分配。</summary>
     public int BarCount { get { lock (_gate) return _bars; } }
 
-    public bool Running { get { lock (_gate) return _capture != null; } }
+    public bool Running { get { lock (_gate) return _taps.Count > 0; } }
+    /// <summary>诊断用：正在喂数据的那块输出设备叫什么。</summary>
+    public string ActiveDevice { get { lock (_gate) return _active?.Name ?? "-"; } }
+
+    /// <summary>诊断用：每块被监听的声卡和它最近的能量。</summary>
+    public string TapDiagnostics
+    {
+        get
+        {
+            lock (_gate)
+                return _taps.Count == 0
+                    ? "none"
+                    : string.Join(" | ", _taps.Select(t =>
+                        t.Error.Length > 0
+                            ? $"{t.Name}=ERR:{t.Error}"
+                            : $"{t.Name}={t.Energy:0.0000}"));
+        }
+    }
     public long BytesCaptured { get { lock (_gate) return _bytes; } }
     public long Frames { get { lock (_gate) return _frames; } }
     public float Peak { get { lock (_gate) return _peak; } }
@@ -65,37 +99,63 @@ public sealed class SpectrumService : IDisposable
     {
         lock (_gate)
         {
-            if (_capture != null || !_options.Enabled) return;
+            if (_taps.Count > 0 || !_options.Enabled) return;
+            var taps = new List<Tap>();
             try
             {
-                var capture = new WasapiLoopbackCapture();
-                _format = capture.WaveFormat;
-                _sampleRate = _format.SampleRate;
-                RebuildRanges();
-                UpdateDecay();
-                capture.DataAvailable += OnData;
-                capture.StartRecording();
-                _capture = capture;
+                using var enumerator = new MMDeviceEnumerator();
+                foreach (var device in enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
+                {
+                    try
+                    {
+                        var loop = new WasapiLoopbackCapture(device);
+                        taps.Add(new Tap { Capture = loop, Format = loop.WaveFormat, Name = device.FriendlyName });
+                    }
+                    catch { }
+                }
             }
-            catch
+            catch { }
+            if (taps.Count == 0)
             {
-                _capture = null;
-                _format = null;
+                // 枚举失败就退回"默认设备"，至少不比以前差。
+                try
+                {
+                    var loop = new WasapiLoopbackCapture();
+                    taps.Add(new Tap { Capture = loop, Format = loop.WaveFormat, Name = "默认设备" });
+                }
+                catch { }
             }
+            if (taps.Count == 0) return;
+
+            _sampleRate = taps[0].Format.SampleRate;
+            RebuildRanges();
+            UpdateDecay();
+            foreach (var tap in taps)
+            {
+                tap.Capture.DataAvailable += (_, e) => OnData(tap, e);
+                try { tap.Capture.StartRecording(); }
+                catch (Exception ex) { tap.Error = ex.GetType().Name + ":" + ex.Message; }
+            }
+            _taps.AddRange(taps);
+            _active = taps[0];
+            _format = taps[0].Format;
         }
     }
 
     public void Stop()
     {
-        WasapiLoopbackCapture? capture;
+        List<Tap> taps;
         lock (_gate)
         {
-            capture = _capture;
-            _capture = null;
+            taps = new List<Tap>(_taps);
+            _taps.Clear();
+            _active = null;
         }
-        if (capture == null) return;
-        try { capture.StopRecording(); } catch { }
-        try { capture.Dispose(); } catch { }
+        foreach (var tap in taps)
+        {
+            try { tap.Capture.StopRecording(); } catch { }
+            try { tap.Capture.Dispose(); } catch { }
+        }
     }
 
     /// <summary>当前各条。快衰减那组画实心条，慢衰减那组画残影。</summary>
@@ -104,13 +164,33 @@ public sealed class SpectrumService : IDisposable
         lock (_gate) return (slow ? _slow : _fast).ToArray();
     }
 
-    private void OnData(object? sender, WaveInEventArgs e)
+    private void OnData(Tap tap, WaveInEventArgs e)
     {
         lock (_gate)
         {
             _bytes += e.BytesRecorded;
-            var format = _format;
+            var format = tap.Format;
             if (format == null || e.BytesRecorded <= 0) return;
+
+            tap.Energy = tap.Energy * 0.6 + EstimateEnergy(e.Buffer, e.BytesRecorded, format) * 0.4;
+
+            // 换成当前最响的那一路。带 2 倍迟滞，免得两块都没声时来回跳。
+            var best = _active;
+            foreach (var other in _taps)
+                if (best == null || other.Energy > best.Energy) best = other;
+            if (best != null && best != _active && best.Energy > (_active?.Energy ?? 0) * 2 + 1e-9)
+            {
+                _active = best;
+                _format = best.Format;
+                if (Math.Abs(best.Format.SampleRate - _sampleRate) > 1)
+                {
+                    _sampleRate = best.Format.SampleRate;
+                    RebuildRanges();
+                    UpdateDecay();
+                }
+                _pending.Clear();   // 换设备就别把两边的采样拼在一起
+            }
+            if (tap != _active) return;
 
             int channels = Math.Max(1, format.Channels);
             bool isFloat = format.Encoding == WaveFormatEncoding.IeeeFloat;
@@ -136,6 +216,28 @@ public sealed class SpectrumService : IDisposable
             // 攒得太多说明没人来取（比如 UI 被关掉了），别让它无限长大。
             if (_pending.Count > FftSize * 8) _pending.RemoveRange(0, _pending.Count - FftSize * 8);
         }
+    }
+
+    /// <summary>粗略能量（抽样算均方），只用来判断"哪块声卡在响"，不用精确。</summary>
+    private static double EstimateEnergy(byte[] buffer, int count, WaveFormat format)
+    {
+        bool isFloat = format.Encoding == WaveFormatEncoding.IeeeFloat;
+        int bytesPerSample = isFloat ? 4 : Math.Max(1, format.BitsPerSample / 8);
+        int channels = Math.Max(1, format.Channels);
+        int stride = bytesPerSample * channels;
+        if (stride <= 0) return 0;
+        double sum = 0;
+        int n = 0;
+        for (int offset = 0; offset + stride <= count; offset += stride * 8)
+        {
+            double value = 0;
+            for (int c = 0; c < channels; c++)
+                value += ReadSample(buffer, offset + c * bytesPerSample, isFloat);
+            value /= channels;
+            sum += value * value;
+            n++;
+        }
+        return n == 0 ? 0 : sum / n;
     }
 
     private static float ReadSample(byte[] buffer, int offset, bool isFloat)

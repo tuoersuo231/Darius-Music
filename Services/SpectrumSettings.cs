@@ -66,6 +66,18 @@ public sealed class SpectrumSettings
     /// <summary>镜像布局：中间低频、两边高频。false = 从左到右由低到高。</summary>
     public bool Mirror { get; set; } = true;
 
+    /// <summary>
+    /// 画在哪一层。
+    /// <c>overlay</c>（默认）= 浮在界面之上、贴住窗口底边，不参与布局，看得见但会盖住播放条那一条；
+    /// <c>backdrop</c> = 夹在壁纸和面板之间（真正的"UI 后层"），面板不透明时会被整块挡住，
+    /// 要把「界面外观 → 主题不透明度」降到 60% 左右才透得出来。
+    /// </summary>
+    public string Layer { get; set; } = "overlay";
+
+    /// <summary>Layer 是否等于 backdrop。</summary>
+    public bool IsBackdrop =>
+        string.Equals((Layer ?? "").Trim(), "backdrop", StringComparison.OrdinalIgnoreCase);
+
     // ---------- 文件 ----------
 
     private static readonly JsonSerializerOptions Json = new()
@@ -120,6 +132,7 @@ public sealed class SpectrumSettings
         FastMs = double.IsNaN(FastMs) || FastMs < 20 ? 150 : Math.Min(2000, FastMs);
         SlowMs = double.IsNaN(SlowMs) || SlowMs < FastMs ? Math.Max(FastMs, 800) : Math.Min(4000, SlowMs);
         GhostAlpha = Math.Clamp(GhostAlpha <= 0 ? 70 : GhostAlpha, 0, 255);
+        Layer = IsBackdrop ? "backdrop" : "overlay";
         return this;
     }
 
