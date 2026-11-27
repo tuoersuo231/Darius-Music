@@ -300,15 +300,20 @@ public sealed class SpectrumService : IDisposable
         for (int bar = 0; bar < _bands; bar++)
         {
             var (start, end) = _ranges[bar];
-            double loudest = 0;
+            // 取频段内的 RMS 而不是"最大那根 bin"：低频道段只有一两根 bin、高频有十几根，
+            // 取最大值会让高频凭空高出 10~15 dB —— 再叠加逐条增益，中间（低频）那几根就永远算成 0，
+            // 看起来就是"频谱中间断掉一块"。RMS 和频段宽窄无关，各段才在一个量级上。
+            double sumPower = 0;
+            int bins = 0;
             for (int bin = start; bin < end && bin < FftSize / 2; bin++)
             {
                 double re = _buffer[bin].X;
                 double im = _buffer[bin].Y;
-                double magnitude = Math.Sqrt(re * re + im * im);
-                if (magnitude > loudest) loudest = magnitude;
+                sumPower += re * re + im * im;
+                bins++;
             }
-            // 高频天生比低频弱 20~30 dB，按条号补回来（每条约 +1.2 dB），否则右边一半永远是 0。
+            double loudest = bins > 0 ? Math.Sqrt(sumPower / bins) : 0;
+            // 高频天生比低频弱，按条号补回来，否则右边一半永远是 0。
             loudest *= Math.Pow(boost, bar);
             double db = 20 * Math.Log10(loudest + 1e-12);
             _db[bar] = db;
