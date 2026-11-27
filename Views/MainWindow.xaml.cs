@@ -2468,11 +2468,11 @@ public partial class MainWindow : Window
         }
     }
 
-    /// <summary>QA：背景暗度，走和界面外观滑块同一条路。</summary>
+    /// <summary>QA：背景暗度，走和界面外观滑块同一条路（ApplySettings）。</summary>
     internal string DebugSetScrim(double value)
     {
         _settings.ThemeScrim = Math.Clamp(value, 0, 100);
-        ApplyAppearance();
+        ApplySettings(_settings);
         return $"scrim={_settings.ThemeScrim:0} opacity={themeScrim?.Opacity:0.00}";
     }
 
@@ -2694,7 +2694,7 @@ public partial class MainWindow : Window
         _nowPlayingView?.RefreshFromSettings();
         // The 下载与存储 window edits the cookie/quality too, so the API client has to follow it.
         ApplyNeteaseSettings();
-        string signature = $"{settings.ThemeImage}|{settings.ThemeAccent}|{settings.ThemeSurface}|{settings.ThemeOpacity:0.##}|{Services.SpectrumOptions.Current.Layer}|{Services.SpectrumOptions.Current.PanelSeeThrough}";
+        string signature = $"{settings.ThemeImage}|{settings.ThemeAccent}|{settings.ThemeSurface}|{settings.ThemeOpacity:0.##}|{settings.ThemeScrim:0.##}|{Services.SpectrumOptions.Current.Layer}|{Services.SpectrumOptions.Current.PanelSeeThrough}";
         if (signature != _themeSignature)
         {
             _themeSignature = signature;

@@ -6093,6 +6093,10 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
             Environment.NewLine + "scrim: " + main.DebugSetScrim(60));
         for (int i = 0; i < 8; i++) Pump(app, 80);
         Save(main, Path.Combine(dir, "main-scrim.png"));
+        File.AppendAllText(Path.Combine(dir, "layout.txt"),
+            Environment.NewLine + "scrim off: " + main.DebugSetScrim(0));
+        for (int i = 0; i < 8; i++) Pump(app, 80);
+        Save(main, Path.Combine(dir, "main-scrim0.png"));
         if (main.FindName("bottomSpectrum") is Controls.SpectrumView homeSpectrum)
             File.AppendAllText(Path.Combine(dir, "layout.txt"),
                 Environment.NewLine + "spectrum: " + homeSpectrum.DebugState);
