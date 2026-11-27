@@ -280,11 +280,15 @@ public partial class AppearanceWindow : Window
         bool hasBackdrop = cover || (image.Length > 0 && File.Exists(image));
         sldThemeOpacity.IsEnabled = hasBackdrop;
         sldThemeBlur.IsEnabled = hasBackdrop;
-        sldThemeScrim.IsEnabled = hasBackdrop;
         sldThemeOpacity.Opacity = hasBackdrop ? 1 : 0.4;
         sldThemeBlur.Opacity = hasBackdrop ? 1 : 0.4;
         txtThemeOpacity.Opacity = hasBackdrop ? 1 : 0.4;
         txtThemeBlur.Opacity = hasBackdrop ? 1 : 0.4;
+        // 背景暗度跟有没有图无关：它压的是窗口里那一层黑。没有背景图时（尤其是透明背景）
+        // 压的是桌面，照样有效。以前跟着 hasBackdrop 一起被禁用，滑块却还是满亮，拖了没反应。
+        sldThemeScrim.IsEnabled = true;
+        sldThemeScrim.Opacity = 1;
+        txtThemeScrim.Opacity = 1;
     }
 
     /// <summary><paramref name="persist"/> is false while the picker is being dragged: the window
@@ -304,6 +308,14 @@ public partial class AppearanceWindow : Window
 
     private void OnSurfaceSwatchClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
         => ShowPickerFor("背景色", _settings.ThemeSurface, "ThemeSurface");
+
+    /// <summary>QA：像拖滑块一样改背景暗度，走和用户完全相同的回调链。</summary>
+    internal string DebugSetScrim(double value)
+    {
+        _initializing = false;
+        sldThemeScrim.Value = value;
+        return $"enabled={sldThemeScrim.IsEnabled} slider={sldThemeScrim.Value:0} setting={_settings.ThemeScrim:0}";
+    }
 
     private void ShowPickerFor(string title, string current, string field)
     {

@@ -2476,6 +2476,9 @@ public partial class MainWindow : Window
         return $"scrim={_settings.ThemeScrim:0} opacity={themeScrim?.Opacity:0.00}";
     }
 
+    /// <summary>QA：让外部构造的窗口也能走主窗口的设置回调。</summary>
+    internal void DebugApplySettings(AppSettings settings) => ApplySettings(settings);
+
     /// <summary>QA：把当前频谱挂载位置报出来（overlay / backdrop / 无父级）。</summary>
     internal string DebugSpectrumLayer()
     {

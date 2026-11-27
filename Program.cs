@@ -6131,6 +6131,32 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
             Environment.NewLine + "scrim off: " + main.DebugSetScrim(0));
         for (int i = 0; i < 8; i++) Pump(app, 80);
         Save(main, Path.Combine(dir, "main-scrim0.png"));
+        // 分层窗口（透明背景）下 RenderTargetBitmap 看不到桌面，只能抓屏对比。
+        CaptureScreen(main, Path.Combine(dir, "screen-scrim0.png"));
+        File.AppendAllText(Path.Combine(dir, "layout.txt"),
+            Environment.NewLine + "scrim full: " + main.DebugSetScrim(80));
+        for (int i = 0; i < 10; i++) Pump(app, 80);
+        CaptureScreen(main, Path.Combine(dir, "screen-scrim80.png"));
+        // 走界面外观窗口里那根滑块的完整链路（用户实际操作的路径）。
+        if (args.Contains("--appearance-scrim"))
+        {
+            var appearanceWindow = new Views.AppearanceWindow(settings, main.DebugApplySettings, main.ApplyAppearance)
+            {
+                Owner = main,
+            };
+            appearanceWindow.Show();
+            for (int i = 0; i < 8; i++) Pump(app, 80);
+            File.AppendAllText(Path.Combine(dir, "layout.txt"),
+                Environment.NewLine + "appearance scrim 0: " + appearanceWindow.DebugSetScrim(0));
+            for (int i = 0; i < 10; i++) Pump(app, 80);
+            CaptureScreen(main, Path.Combine(dir, "screen-slider0.png"));
+            File.AppendAllText(Path.Combine(dir, "layout.txt"),
+                Environment.NewLine + "appearance scrim 90: " + appearanceWindow.DebugSetScrim(90));
+            for (int i = 0; i < 10; i++) Pump(app, 80);
+            CaptureScreen(main, Path.Combine(dir, "screen-slider90.png"));
+            appearanceWindow.Close();
+            for (int i = 0; i < 4; i++) Pump(app, 60);
+        }
         if (main.FindName("bottomSpectrum") is Controls.SpectrumView homeSpectrum)
             File.AppendAllText(Path.Combine(dir, "layout.txt"),
                 Environment.NewLine + "spectrum: " + homeSpectrum.DebugState);
@@ -6829,6 +6855,24 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
         encoder.Frames.Add(BitmapFrame.Create(rtb));
         using var fs = File.Create(path);
         encoder.Save(fs);
+    }
+
+    /// <summary>抓屏：分层窗口（透明背景）合成后的真实画面，RenderTargetBitmap 看不到桌面。</summary>
+    private static void CaptureScreen(Window window, string path)
+    {
+        try
+        {
+            var dpi = VisualTreeHelper.GetDpi(window);
+            int x = (int)Math.Round(window.Left * dpi.DpiScaleX);
+            int y = (int)Math.Round(window.Top * dpi.DpiScaleY);
+            int w = Math.Max(1, (int)Math.Round(window.ActualWidth * dpi.DpiScaleX));
+            int h = Math.Max(1, (int)Math.Round(window.ActualHeight * dpi.DpiScaleY));
+            using var bmp = new System.Drawing.Bitmap(w, h);
+            using var g = System.Drawing.Graphics.FromImage(bmp);
+            g.CopyFromScreen(x, y, 0, 0, new System.Drawing.Size(w, h));
+            bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+        }
+        catch { }
     }
 
     /// <summary>Borderless window covering the whole virtual desktop in one flat colour.</summary>
