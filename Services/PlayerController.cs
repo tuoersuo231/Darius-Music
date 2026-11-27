@@ -1070,30 +1070,11 @@ public sealed class PlayerController : IDisposable
             int seconds = (int)song.Duration.TotalSeconds;
             if (_waitForWordLevel)
             {
-                LyricDocument? upgraded = null;
-                try { upgraded = await AmllLyrics.EnsureAsync(cloudId, doc).ConfigureAwait(false); }
-                catch { }
-                if (upgraded == null)
-                {
-                    try
-                    {
-                        upgraded = await KugouLyric
-                            .EnsureAsync(cloudId, song.DisplayTitle, song.DisplayArtist, seconds, doc)
-                            .ConfigureAwait(false);
-                    }
-                    catch { upgraded = null; }
-                }
-                if (upgraded == null)
-                {
-                    try
-                    {
-                        upgraded = await QqLyric
-                            .EnsureAsync(cloudId, song.DisplayTitle, song.DisplayArtist, doc, seconds)
-                            .ConfigureAwait(false);
-                    }
-                    catch { upgraded = null; }
-                }
-                if (upgraded != null) return upgraded;
+                var tried = new List<string>();
+                var probe = System.Diagnostics.Stopwatch.StartNew();
+                var inline = await FetchWordLevelAsync(cloudId, song, doc, seconds, tried).ConfigureAwait(false);
+                LogLyric(song, cloudId, inline, tried, probe.ElapsedMilliseconds);
+                if (inline != null) return inline;
             }
             else
             {
@@ -1107,22 +1088,77 @@ public sealed class PlayerController : IDisposable
 
     private async Task UpgradeToWordLevelAsync(long cloudId, Song song, LyricDocument baseDoc, int seconds)
     {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var tried = new List<string>();
         try
         {
-            // AMLL first: exact by song id, and it carries the translation and romanisation with it.
-            var doc = await AmllLyrics.EnsureAsync(cloudId, baseDoc, TimeSpan.FromSeconds(10))
-                .ConfigureAwait(false);
-            doc ??= await KugouLyric
-                .EnsureAsync(cloudId, song.DisplayTitle, song.DisplayArtist, seconds, baseDoc,
-                    TimeSpan.FromSeconds(15))
-                .ConfigureAwait(false);
-            doc ??= await QqLyric
-                .EnsureAsync(cloudId, song.DisplayTitle, song.DisplayArtist, baseDoc, seconds,
-                    TimeSpan.FromSeconds(20))
-                .ConfigureAwait(false);
+            var doc = await FetchWordLevelAsync(cloudId, song, baseDoc, seconds, tried).ConfigureAwait(false);
+            LogLyric(song, cloudId, doc, tried, watch.ElapsedMilliseconds);
             if (doc == null || !ReferenceEquals(Current, song)) return;
             Lyrics = LrcParser.WithOpeningCard(doc, song.DisplayTitle, song.DisplayArtist, song.Album);
             LyricsChanged?.Invoke();
+        }
+        catch { }
+    }
+
+    /// <summary>
+    /// 逐字来源依次尝试：AMLL（按 id 取，带译文/罗马音）→ 酷狗 KRC（按 hash 对，最不容易串版本）→
+    /// 腾讯 QRC（按歌名搜）。一个来源没有、或者拿到的候选过不了闸，就继续下一个；全都不行返回 null，
+    /// 界面上仍是网易云那份文字 + 收短后的均分动画。
+    /// </summary>
+    private async Task<LyricDocument?> FetchWordLevelAsync(long cloudId, Song song, LyricDocument baseDoc,
+        int seconds, List<string>? tried = null)
+    {
+        tried ??= new List<string>();
+
+        LyricDocument? doc = null;
+        try { doc = await AmllLyrics.EnsureAsync(cloudId, baseDoc, TimeSpan.FromSeconds(10)).ConfigureAwait(false); }
+        catch { }
+        tried.Add(doc != null ? "amll+" : "amll-");
+
+        if (doc == null)
+        {
+            try
+            {
+                doc = await KugouLyric
+                    .EnsureAsync(cloudId, song.DisplayTitle, song.DisplayArtist, seconds, baseDoc,
+                        TimeSpan.FromSeconds(15))
+                    .ConfigureAwait(false);
+            }
+            catch { }
+            tried.Add(doc != null ? "kugou+" : "kugou-");
+        }
+
+        if (doc == null)
+        {
+            try
+            {
+                doc = await QqLyric
+                    .EnsureAsync(cloudId, song.DisplayTitle, song.DisplayArtist, baseDoc, seconds,
+                        TimeSpan.FromSeconds(20))
+                    .ConfigureAwait(false);
+            }
+            catch { }
+            tried.Add(doc != null ? "qq+" : "qq-");
+        }
+        return doc;
+    }
+
+    /// <summary>What the second-source chain actually did, one line per song: which sources were tried
+    /// (<c>+</c> hit / <c>-</c> miss), what the winner produced, and how long it took.</summary>
+    private static void LogLyric(Song song, long cloudId, LyricDocument? doc, List<string> tried, long elapsedMs)
+    {
+        try
+        {
+            var line = doc == null
+                ? $"{DateTime.Now:MM-dd HH:mm:ss} id={cloudId} '{song.DisplayTitle}' {string.Join(" ", tried)} " +
+                  $"-> none ({elapsedMs}ms)"
+                : $"{DateTime.Now:MM-dd HH:mm:ss} id={cloudId} '{song.DisplayTitle}' {string.Join(" ", tried)} " +
+                  $"-> lines={doc.Lines.Count} words={doc.Lines.Count(l => l.Words.Count > 0)} " +
+                  $"tr={doc.Lines.Count(l => l.Translation.Length > 0)} ({elapsedMs}ms)";
+            var path = Path.Combine(AppPaths.DataDir, "lyrics.log");
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.AppendAllText(path, line + Environment.NewLine);
         }
         catch { }
     }
