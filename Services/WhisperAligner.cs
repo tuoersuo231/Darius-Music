@@ -8,17 +8,17 @@ using Microsoft.ML.OnnxRuntime.Tensors;
 namespace CurrentLyrics.Services;
 
 /// <summary>
-/// B 方案：Whisper 交叉注意力 + DTW 的强制对齐銆?
-/// 编码器 20 ms 涓€甯э紙1500 甯?= 30 s锛夛紝瑙ｇ爜鍣?teacher-forcing 璺戞暣琛?token锛?
-/// 杈撳嚭姣忓眰 cross-attention [heads, T_tok, 1500]锛屽啀鐢?DTW 鎶婃瘡涓?token 钀藉埌鍏蜂綋甯т笂銆?
-/// 鍜?SenseVoice 閭ｅ楜瀹屽叏鐙珛锛屼换浣曚竴姝ュけ璐ラ兘涓嶅奖鍝嶇幇鏈夌殑鍔熻兘銆?
+/// Plan B: forced alignment from Whisper cross-attention.
+/// The encoder emits one frame per 20 ms (1500 frames = 30 s); the decoder is run once over the whole
+/// line with teacher forcing and returns cross_attentions[heads, T_tok, 1500] for every layer.
+/// Fully independent from the SenseVoice path: if anything here fails the old path is unaffected.
 /// </summary>
 public sealed class WhisperAligner : IDisposable
 {
     public const int SampleRate = 16000;
-    public const int MelFrames = WhisperMel.ChunkFrames;   // 3000 mel 甯?= 30 s
-    public const int EncFrames = WhisperMel.EncoderFrames; // 1500 缂栫爜甯?= 20 ms
-    public const int EncDim = 768;
+    public const int MelFrames = WhisperMel.ChunkFrames;   // 3000 mel frames = 30 s
+    public const int EncFrames = WhisperMel.EncoderFrames; // 1500 encoder frames = 20 ms each
+    public int EncDim { get; } = 768;
     public const int FrameMs = 20;
 
     private readonly InferenceSession _encoder;
@@ -33,13 +33,14 @@ public sealed class WhisperAligner : IDisposable
     public bool HasLogits { get; }
 
     private WhisperAligner(InferenceSession encoder, InferenceSession decoder,
-        WhisperTokenizer tokenizer, int layers, int heads, long loadMs, string dir, string decoderFile)
+        WhisperTokenizer tokenizer, int layers, int heads, int encDim, long loadMs, string dir, string decoderFile)
     {
         _encoder = encoder;
         _decoder = decoder;
         Tokenizer = tokenizer;
         NumLayers = layers;
         NumHeads = heads;
+        EncDim = encDim;
         LoadMs = loadMs;
         ModelDir = dir;
         DecoderFile = decoderFile;
@@ -89,12 +90,15 @@ public sealed class WhisperAligner : IDisposable
             if (dims.Length == 4 && dims[1] > 0) heads = dims[1];
         }
 
+        int encDim = 768;
+        var encDims = encoder.OutputMetadata.First().Value.Dimensions;
+        if (encDims.Length == 3 && encDims[2] > 0) encDim = encDims[2];
+
         var tok = WhisperTokenizer.Load(dir);
-        return new WhisperAligner(encoder, decoder, tok, layers, heads, sw.ElapsedMilliseconds, dir,
+        return new WhisperAligner(encoder, decoder, tok, layers, heads, encDim, sw.ElapsedMilliseconds, dir,
             Path.GetFileName(decPath));
     }
 
-    /// <summary>mel [80*3000] 鈫?encoded [1500*768]銆?/summary>
     public float[] Encode(float[] melInput)
     {
         var tensor = new DenseTensor<float>(melInput, new[] { 1, WhisperMel.NumMels, MelFrames });
@@ -105,8 +109,6 @@ public sealed class WhisperAligner : IDisposable
     }
 
     /// <summary>
-    /// teacher-forcing 跑一整行 token锛岃繑鍥炴瘡灞?cross-attention锛?
-    /// 姣忓眰 flat 闀垮害 = NumHeads * T * 1500锛屽竷灞€ [head][token][frame]銆?
     /// </summary>
     public float[] Decode(float[] encoded, int[] tokenIds, out int tTok)
     {
@@ -132,7 +134,6 @@ public sealed class WhisperAligner : IDisposable
             all[i] = t is DenseTensor<float> d ? d.Buffer.ToArray() : t.ToArray();
         }
 
-        // 鎷兼垚涓€涓?flat锛歲ayer 蹇?* (heads*tTok*1500)
         int perLayer = NumHeads * tTok * EncFrames;
         var flat = new float[NumLayers * perLayer];
         for (int i = 0; i < NumLayers; i++) Array.Copy(all[i], 0, flat, i * perLayer, perLayer);
@@ -176,7 +177,6 @@ public sealed class WhisperAligner : IDisposable
     }
 
     /// <summary>
-    /// 鍙栨寚瀹氬眰/澶寸殑 attention 骞冲潎锛岃緭鍑?[T_tok, 1500]锛岃绗煎綊涓€鍖栧埌 0~1銆?
     /// </summary>
     public static float[] ReduceHeads(float[] flat, int layers, int heads, int tTok, int[] useLayers, int[]? useHeads = null)
     {

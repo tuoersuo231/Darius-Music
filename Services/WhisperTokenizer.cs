@@ -8,8 +8,8 @@ using System.Text.RegularExpressions;
 namespace CurrentLyrics.Services;
 
 /// <summary>
-/// Whisper 的 BPE 分词器（GPT-2 byte-level）锛?
-/// 歌词鏂囨湰 鈫?UTF-8 瀛楄妭 鈫?byte鈫抲nicode 鏄犲皠 鈫?棰勫垏鍒?鈫?merges 鍚堝苟 鈫?token id銆?
+/// Whisper BPE tokenizer (GPT-2 byte level): text -> UTF-8 bytes -> byte-to-unicode -> pre-split ->
+/// merges -> token ids.
 /// </summary>
 public sealed class WhisperTokenizer
 {
@@ -38,7 +38,7 @@ public sealed class WhisperTokenizer
     {
         var vocabPath = Path.Combine(modelDir, "vocab.json");
         var mergesPath = Path.Combine(modelDir, "merges.txt");
-        if (!File.Exists(vocabPath)) throw new FileNotFoundException("whisper vocab.json 涓嶅湪", vocabPath);
+        if (!File.Exists(vocabPath)) throw new FileNotFoundException("whisper vocab.json not found", vocabPath);
 
         var vocab = JsonSerializer.Deserialize<Dictionary<string, int>>(File.ReadAllText(vocabPath))
                     ?? throw new InvalidDataException("vocab.json 解析失败");
@@ -80,7 +80,6 @@ public sealed class WhisperTokenizer
         if (_vocab.TryGetValue("<|notimestamps|>", out var nt)) NoTimestampsToken = nt;
     }
 
-    /// <summary>语言 token，比如 "ja" 鈫?&lt;|ja|&gt; 鐨?id锛涙病鏈夎繑鍥?-1銆?/summary>
     public int LanguageToken(string lang)
     {
         return _vocab.TryGetValue($"<|{lang}|>", out var id) ? id : -1;

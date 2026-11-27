@@ -4,8 +4,8 @@ using System.Collections.Generic;
 namespace CurrentLyrics.Services;
 
 /// <summary>
-/// DTW over the cross-attention matrix (row = text token, column = 20 ms encoder frame).
-/// The path is monotonic, so token times can never go backwards.
+/// Turning a cross-attention matrix into per-token times.
+/// Row = text token, column = 20 ms encoder frame.
 /// </summary>
 public static class WhisperDtw
 {

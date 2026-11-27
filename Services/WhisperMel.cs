@@ -4,9 +4,9 @@ using System.Threading.Tasks;
 namespace CurrentLyrics.Services;
 
 /// <summary>
-/// Whisper 的输入特征：log-mel 80 缁达紝16 kHz / 25 ms 窗 / 10 ms 鎸?锛岃緭鍑?0 ms 涓€甯с€?
-/// 鍜?SenseVoice 鐨?fbank 涓嶅悓锛歨ann 绐?+ 201 鏉?DFT + librosa Slaney mel锛岀劧鍚?log10 鍐嶅帇鍒?8 涓?鏁伴噺绾э紝
-/// 鏈€鍚?<c>(x + 4) / 4</c> 褰掍竴鍖栧埌 [-1, 1]銆?
+/// Whisper input features: 80-dim log-mel, 16 kHz, 25 ms window / 10 ms hop, 20 ms frames at the encoder.
+/// Different from the SenseVoice fbank: hann window, 201-point rFFT, librosa Slaney mel, log10 with an
+/// 8-decade floor, then (x + 4) / 4.
 /// </summary>
 public static class WhisperMel
 {
@@ -84,7 +84,6 @@ public static class WhisperMel
             double low = hzF[m];
             double center = hzF[m + 1];
             double high = hzF[m + 2];
-            // Slaney 归一化：面积（hz 宽度）归一
             double enorm = 2.0 / (high - low);
             for (int k = 0; k < NumBins; k++)
             {
