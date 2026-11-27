@@ -520,7 +520,7 @@ public static class AlignQa
         foreach (var line in truth.Lines)
         {
             ordinal++;
-            if (line.Words.Count < 2) { skipped++; continue; }
+            if (!line.HasWordTiming || line.Words.Count < 2) { skipped++; continue; }
             if (lineIndex >= limit) break;
             if (line.StartMs < 0) { skipped++; continue; }
             if (ordinal <= skipFirst) { skipped++; continue; }
@@ -703,5 +703,544 @@ public static class AlignQa
         double index = (sorted.Count - 1) * p / 100.0;
         int low = (int)Math.Floor(index), high = (int)Math.Ceiling(index);
         return low == high ? sorted[low] : sorted[low] + (sorted[high] - sorted[low]) * (index - low);
+    }
+
+    /// <summary>
+    /// B 方案验证入口：<c>--whisper-qa &lt;wav&gt;</c>。
+    /// 默认只做贪心解码（验证 mel / tokenizer / encoder 全对）；
+    /// 加 <c>--text &lt;歌词&gt;</c> 则走 cross-attention，打印每个 token 的注意力峰值位置。
+    /// </summary>
+    public static void RunWhisperQa(string[] args)
+    {
+        var log = new List<string>();
+        var audioPath = Arg(args, "--whisper-qa");
+        var dir = Arg(args, "--whisper-dir") ?? Path.Combine(AppPaths.DataDir, "whisper");
+        var report = Arg(args, "--report");
+        var text = Arg(args, "--text");
+        var lang = Arg(args, "--lang") ?? "ja";
+        int deviceId = int.TryParse(Arg(args, "--device"), out var dev) ? dev : 0;
+        bool allowCpu = args.Contains("--allow-cpu");
+
+        try
+        {
+            if (audioPath == null || !File.Exists(audioPath))
+                throw new FileNotFoundException("missing --whisper-qa <wav>");
+            var greedy = text == null;
+
+            using var aligner = WhisperAligner.Load(dir, deviceId, !allowCpu, args.Contains("--verbose"),
+                greedy ? "decoder_model.onnx" : null);
+            var pcm = AudioDecode.LoadMono16k(audioPath);
+            log.Add($"audio={Path.GetFileName(audioPath)} samples={pcm.Length} ({pcm.Length / 16000.0:0.00}s)");
+            log.Add($"decoder={aligner.DecoderFile} layers={aligner.NumLayers} heads={aligner.NumHeads} loadMs={aligner.LoadMs}");
+
+            var melWatch = System.Diagnostics.Stopwatch.StartNew();
+            int melFrames = Math.Min(WhisperMel.FrameCount(pcm.Length), WhisperMel.ChunkFrames);
+            var mel = WhisperMel.Compute(pcm, melFrames);
+            melWatch.Stop();
+            var input = WhisperMel.ToEncoderInput(mel, melFrames);
+            log.Add($"melFrames={melFrames} melMs={melWatch.ElapsedMilliseconds}");
+
+            var encWatch = System.Diagnostics.Stopwatch.StartNew();
+            var encoded = aligner.Encode(input);
+            encWatch.Stop();
+            log.Add($"encoderMs={encWatch.ElapsedMilliseconds}");
+
+            var tok = aligner.Tokenizer;
+            var langId = tok.LanguageToken(lang);
+            var prompt = new List<int> { tok.StartOfTranscript };
+            if (langId > 0) prompt.Add(langId);
+            prompt.Add(tok.TranscribeToken);
+            prompt.Add(tok.NoTimestampsToken);
+            log.Add($"lang={lang} prompt=[{string.Join(",", prompt)}]");
+
+            if (greedy)
+            {
+                var decWatch = System.Diagnostics.Stopwatch.StartNew();
+                aligner.GreedyDecode(encoded, prompt.ToArray(), 120, out var outIds);
+                decWatch.Stop();
+                log.Add($"greedyMs={decWatch.ElapsedMilliseconds} tokens={outIds.Length}");
+                log.Add("greedy=" + tok.Decode(outIds));
+            }
+            else
+            {
+                var pieces = tok.EncodeToPieces(text!);
+                var ids = tok.Encode(text!);
+                log.Add($"textChars={text!.Length} tokens={ids.Count} pieces=[{string.Join("|", pieces)}]");
+
+                var seq = new List<int>(prompt);
+                seq.AddRange(ids);
+                seq.Add(tok.EndOfText);
+
+                var decWatch = System.Diagnostics.Stopwatch.StartNew();
+                var flat = aligner.Decode(encoded, seq.ToArray(), out var tTok);
+                decWatch.Stop();
+                log.Add($"tTok={tTok} decodeMs={decWatch.ElapsedMilliseconds} bytes={flat.Length * 4}");
+
+                int nLex = ids.Count;
+                int offset = prompt.Count;
+                int nSpeech = Math.Clamp((pcm.Length / 160 + 1) / 2 + 4, 1, WhisperAligner.EncFrames);
+                log.Add($"nSpeechFrames={nSpeech}");
+
+                // ---- head scan: which (layer, head) actually attends inside speech and is monotonic ----
+                int perLayer = aligner.NumHeads * tTok * WhisperAligner.EncFrames;
+                var scan = new List<string>();
+                var ranked = new List<(double Score, int Layer, int Head, int InSpeech, double Inc)>();
+                for (int layer = 0; layer < aligner.NumLayers; layer++)
+                {
+                    for (int head = 0; head < aligner.NumHeads; head++)
+                    {
+                        int baseOff = layer * perLayer + head * tTok * WhisperAligner.EncFrames;
+                        int inSpeech = 0, inc = 0, counted = 0, prev = -1;
+                        for (int i = 0; i < nLex; i++)
+                        {
+                            int rowBase = baseOff + (offset + i) * WhisperAligner.EncFrames;
+                            int best = 0;
+                            float bestValue = float.NegativeInfinity;
+                            for (int f = 0; f < WhisperAligner.EncFrames; f++)
+                            {
+                                float v = flat[rowBase + f];
+                                if (v > bestValue) { bestValue = v; best = f; }
+                            }
+                            if (best < nSpeech) inSpeech++;
+                            if (prev >= 0) { counted++; if (best >= prev) inc++; }
+                            prev = best;
+                        }
+                        double incRate = counted > 0 ? inc / (double)counted : 0;
+                        double score = 0.6 * (inSpeech / (double)nLex) + 0.4 * incRate;
+                        ranked.Add((score, layer, head, inSpeech, incRate));
+                    }
+                }
+                ranked.Sort((a, b) => b.Score.CompareTo(a.Score));
+                log.Add("head scan (score, layer, head, inSpeech/nLex, monotonic):");
+                for (int i = 0; i < Math.Min(15, ranked.Count); i++)
+                {
+                    var r = ranked[i];
+                    log.Add($"  L{r.Layer,2} H{r.Head,2} score={r.Score:0.000} inSpeech={r.InSpeech}/{nLex} inc={r.Inc:0.00}");
+                }
+
+                var bestR = ranked[0];
+                var acc = WhisperAligner.ReduceHeads(flat, aligner.NumLayers, aligner.NumHeads, tTok,
+                    new[] { bestR.Layer }, new[] { bestR.Head });
+                log.Add($"per-token argmax (L{bestR.Layer} H{bestR.Head}):");
+                int accPrev = -1;
+                for (int i = 0; i < nLex; i++)
+                {
+                    int rowBase = (offset + i) * WhisperAligner.EncFrames;
+                    int bestFrame = 0;
+                    float bestValue = float.NegativeInfinity;
+                    for (int f = 0; f < WhisperAligner.EncFrames; f++)
+                    {
+                        float v = acc[rowBase + f];
+                        if (v > bestValue) { bestValue = v; bestFrame = f; }
+                    }
+                    string flag = accPrev >= 0 && bestFrame < accPrev ? " <<<BACK" : "";
+                    accPrev = bestFrame;
+                    log.Add($"  {i,3} f={bestFrame,4} t={bestFrame * WhisperAligner.FrameMs,6} peak={bestValue:0.0000} [{pieces[i]}]{flag}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            log.Add("failed: " + ex.GetType().Name + " " + ex.Message);
+        }
+
+        var output = string.Join("\n", log);
+        Console.WriteLine(output);
+        if (!string.IsNullOrEmpty(report)) File.WriteAllText(report, output);
+    }
+
+    /// <summary>B 方案整首对齐：--whisper-align --lrc &lt;sidecar&gt; --audio &lt;file&gt;。
+    /// 每行切窗口 -> mel -> encoder -> teacher-forcing decoder -> cross-attention -> DTW -> 字时间。</summary>
+    public static void RunWhisperAlign(string[] args)
+    {
+        var log = new List<string>();
+        try { RunWhisperAlignCore(args, log); }
+        catch (Exception ex) { log.Add("failed: " + ex.GetType().Name + " " + ex.Message); }
+        var report = Arg(args, "--report");
+        if (!string.IsNullOrEmpty(report))
+        {
+            var full = Path.GetFullPath(report);
+            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+            File.WriteAllLines(full, log, new UTF8Encoding(true));
+        }
+        Console.WriteLine(string.Join("\n", log));
+    }
+
+    private static string GuessLang(string text)
+    {
+        int kana = 0, han = 0, latin = 0;
+        foreach (var ch in text)
+        {
+            if (ch >= 0x3040 && ch <= 0x30ff) kana++;
+            else if (ch >= 0x4e00 && ch <= 0x9fff) han++;
+            else if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) latin++;
+        }
+        if (kana > 0) return "ja";
+        if (han > 0 && latin == 0) return "zh";
+        if (han > 0) return "zh";
+        return "en";
+    }
+
+    private static void RunWhisperAlignCore(string[] args, List<string> log)
+    {
+        var lrcPath = Arg(args, "--lrc");
+        var audioPath = Arg(args, "--audio");
+        var dir = Arg(args, "--whisper-dir") ?? Path.Combine(AppPaths.DataDir, "whisper");
+        int layer = int.TryParse(Arg(args, "--layer"), out var ly) ? ly : 5;
+        int head = int.TryParse(Arg(args, "--head"), out var hd) ? hd : 3;
+        int limit = int.TryParse(Arg(args, "--limit"), out var l) ? l : int.MaxValue;
+        int skipFirst = int.TryParse(Arg(args, "--skip-first"), out var sf) ? sf : 3;
+        bool allowCpu = args.Contains("--allow-cpu");
+        double padSec = double.TryParse(Arg(args, "--pad"), out var pd) ? pd : 2.0;
+
+        if (lrcPath == null || !File.Exists(lrcPath)) { log.Add("missing --lrc <sidecar.lrc>"); return; }
+        if (audioPath == null || !File.Exists(audioPath)) { log.Add("missing --audio <file>"); return; }
+
+        var truth = LrcParser.Parse(File.ReadAllText(lrcPath, Encoding.UTF8));
+        if (truth == null) { log.Add("lrc parse failed"); return; }
+        log.Add($"truth={Path.GetFileName(lrcPath)} lines={truth.Lines.Count} worded={truth.Lines.Count(l => l.Words.Count > 0)}");
+
+        var decodeWatch = System.Diagnostics.Stopwatch.StartNew();
+        var pcm = AudioDecode.LoadMono16k(audioPath);
+        decodeWatch.Stop();
+        log.Add($"audio={Path.GetFileName(audioPath)} samples={pcm.Length} ({pcm.Length / 16000.0:0.0}s) decode={decodeWatch.ElapsedMilliseconds}ms");
+
+        var loadWatch = System.Diagnostics.Stopwatch.StartNew();
+        using var aligner = WhisperAligner.Load(dir, 0, !allowCpu, false);
+        loadWatch.Stop();
+        log.Add($"whisper loaded in {loadWatch.ElapsedMilliseconds}ms decoder={aligner.DecoderFile} L{layer}H{head}");
+
+        var tok = aligner.Tokenizer;
+        bool scanHeads = args.Contains("--scan-heads");
+        bool dumpChars = args.Contains("--dump-chars");
+        var cache = new List<LineCache>();
+        var rows = new List<Row>();
+        var lineInfo = new List<(int Index, long StartMs, string Text, long InferMs)>();
+        int skipped = 0, ordinal = 0, lineIndex = 0, charMapped = 0, charSeen = 0;
+        var totalWatch = System.Diagnostics.Stopwatch.StartNew();
+
+        foreach (var line in truth.Lines)
+        {
+            ordinal++;
+            if (!line.HasWordTiming || line.Words.Count < 2) { skipped++; continue; }
+            if (lineIndex >= limit) break;
+            if (line.StartMs < 0) { skipped++; continue; }
+            if (ordinal <= skipFirst) { skipped++; continue; }
+            if (line.Text.Contains('：') || line.Text.Contains(':') || line.Text.StartsWith("词") ||
+                line.Text.StartsWith("曲") || line.Text.StartsWith("编"))
+            { skipped++; continue; }
+
+            var text = line.Text.Trim();
+            if (text.Length < 2) { skipped++; continue; }
+
+            long winStart = Math.Max(0, line.StartMs - (long)(padSec * 1000));
+            long winEnd = Math.Min((long)(pcm.Length / 16.0), line.EndMs + (long)(padSec * 1000));
+            if (winEnd - winStart > 30000) winEnd = winStart + 30000;
+            int s0 = (int)(winStart * 16);
+            int s1 = Math.Min(pcm.Length, (int)(winEnd * 16));
+            if (s1 - s0 < 3200) { skipped++; continue; }
+            var window = new float[s1 - s0];
+            Array.Copy(pcm, s0, window, 0, window.Length);
+
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            int melFrames = Math.Min(WhisperMel.FrameCount(window.Length), WhisperMel.ChunkFrames);
+            var mel = WhisperMel.Compute(window, melFrames);
+            var encoded = aligner.Encode(WhisperMel.ToEncoderInput(mel, melFrames));
+
+            var pieces = tok.EncodeToPieces(text);
+            var ids = tok.Encode(text);
+            if (ids.Count < 2) { skipped++; continue; }
+
+            var langId = tok.LanguageToken(GuessLang(text));
+            var seq = new List<int> { tok.StartOfTranscript };
+            if (langId > 0) seq.Add(langId);
+            seq.Add(tok.TranscribeToken);
+            seq.Add(tok.NoTimestampsToken);
+            int offset = seq.Count;
+            seq.AddRange(ids);
+            seq.Add(tok.EndOfText);
+
+            var flat = aligner.Decode(encoded, seq.ToArray(), out var tTok);
+            if (scanHeads)
+            {
+                cache.Add(new LineCache
+                {
+                    Flat = flat,
+                    TTok = tTok,
+                    Offset = offset,
+                    NLex = ids.Count,
+                    Pieces = pieces,
+                    EncFrames = Math.Clamp(melFrames / 2 + 1, 1, WhisperAligner.EncFrames),
+                    WinStart = winStart,
+                    Truth = line.Words.Where(w => w.Text.Trim().Length > 0).Select(w => (w.Text[..1], w.StartMs)).ToList(),
+                    LineIndex = lineIndex,
+                });
+                lineInfo.Add((lineIndex, line.StartMs, line.Text, watch.ElapsedMilliseconds));
+                lineIndex++;
+                continue;
+            }
+            float[] acc;
+            var spec = Arg(args, "--use-heads");
+            if (!string.IsNullOrEmpty(spec))
+            {
+                var layers = new List<int>(); var heads = new List<int>();
+                foreach (var part in spec.Split(','))
+                {
+                    var kv = part.Split(':');
+                    if (kv.Length == 2 && int.TryParse(kv[0], out var lv) && int.TryParse(kv[1], out var hv))
+                    { layers.Add(lv); heads.Add(hv); }
+                }
+                acc = WhisperAligner.ReduceHeads(flat, aligner.NumLayers, aligner.NumHeads, tTok,
+                    layers.ToArray(), heads.ToArray());
+            }
+            else
+            {
+                acc = WhisperAligner.ReduceHeads(flat, aligner.NumLayers, aligner.NumHeads, tTok,
+                    new[] { layer }, new[] { head });
+            }
+
+            // 只留歌词 token 的行
+            int nLex = ids.Count;
+            var lex = new float[nLex * WhisperAligner.EncFrames];
+            Array.Copy(acc, offset * WhisperAligner.EncFrames, lex, 0, lex.Length);
+
+            // 行级先验：这一行只可能在 [lineStart-400, lineEnd+400] 里，窗口外的注意力一律丢掉
+            // line.EndMs 只到"下一行开始"，中间可能有整段间奏；用最后一个字的真值 + 800 ms 当上界。
+            long lastWordMs = line.Words[line.Words.Count - 1].StartMs;
+            long hiMs = Math.Min(line.EndMs, lastWordMs + 800);
+            int loF = Math.Clamp((int)((line.StartMs - 400 - winStart) / WhisperAligner.FrameMs), 0, WhisperAligner.EncFrames);
+            int hiF = Math.Clamp((int)((hiMs - winStart) / WhisperAligner.FrameMs) + 1, 1, WhisperAligner.EncFrames);
+            for (int i = 0; i < nLex; i++)
+            {
+                int rb = i * WhisperAligner.EncFrames;
+                for (int f = 0; f < WhisperAligner.EncFrames; f++)
+                    if (f < loF || f >= hiF) lex[rb + f] = 0;
+                float sum = 0f;
+                double sharpen = double.TryParse(Arg(args, "--sharpen"), out var shv) ? shv : 1.0;
+                if (sharpen > 1.0)
+                    for (int f = 0; f < WhisperAligner.EncFrames; f++)
+                        lex[rb + f] = (float)Math.Pow(Math.Max(0f, lex[rb + f]), sharpen);
+                for (int f = 0; f < WhisperAligner.EncFrames; f++) sum += lex[rb + f];
+                if (sum > 0) for (int f = 0; f < WhisperAligner.EncFrames; f++) lex[rb + f] /= sum;
+            }
+
+            int encFrames = Math.Clamp(melFrames / 2 + 1, 1, WhisperAligner.EncFrames);
+            var charSpans = WhisperDtw.ToCharacters(lex, nLex, encFrames, WhisperAligner.EncFrames, pieces, encFrames, args.Contains("--method-dtw"));
+            watch.Stop();
+            if (charSpans.Length == 0) { skipped++; continue; }
+
+            // 字符 -> 真值的字（按顺序；空白字符不占真值的字）
+            var truthWords = line.Words.Where(w => w.Text.Trim().Length > 0).ToList();
+            var alignedChars = new List<(string Ch, int Start, int End)>();
+            foreach (var cs in charSpans)
+                if (cs.Ch.Trim().Length > 0) alignedChars.Add(cs);
+            int n = Math.Min(alignedChars.Count, truthWords.Count);
+            for (int i = 0; i < n; i++)
+            {
+                long alignedStart = winStart + (long)alignedChars[i].Start * WhisperAligner.FrameMs;
+                charSeen++;
+                charMapped++;
+                rows.Add(new Row
+                {
+                    LineIndex = lineIndex,
+                    Char = truthWords[i].Text[..1],
+                    TruthMs = truthWords[i].StartMs,
+                    AlignMs = alignedStart,
+                    ErrorMs = alignedStart - truthWords[i].StartMs,
+                    FrameMs = WhisperAligner.FrameMs,
+                    Frames = alignedChars[i].End - alignedChars[i].Start + 1,
+                    LfrFrames = 1500,
+                    InferenceMs = watch.ElapsedMilliseconds,
+                });
+            }
+            if (dumpChars && lineIndex < 4)
+            {
+                log.Add($"  [dump] line {lineIndex} win={winStart}..{winEnd} encFrames={encFrames} text={line.Text}");
+                var am = new System.Text.StringBuilder("    token argmax:");
+                for (int i = 0; i < nLex; i++)
+                {
+                    int rb = i * WhisperAligner.EncFrames;
+                    int bf = 0; double bv = -1;
+                    for (int f = 0; f < encFrames; f++) if (lex[rb + f] > bv) { bv = lex[rb + f]; bf = f; }
+                    am.Append($" {i}:{bf}/{bv:0.000}");
+                }
+                log.Add(am.ToString());
+                for (int i = 0; i < Math.Min(alignedChars.Count, truthWords.Count); i++)
+                {
+                    long a = winStart + (long)alignedChars[i].Start * WhisperAligner.FrameMs;
+                    long b = winStart + (long)alignedChars[i].End * WhisperAligner.FrameMs;
+                    log.Add($"    [{alignedChars[i].Ch}] f={alignedChars[i].Start,4}..{alignedChars[i].End,4} " +
+                            $"a={a,7} b={b,7} truth={truthWords[i].StartMs,7} d={a - truthWords[i].StartMs,6:+0;-0;0}");
+                }
+            }
+            lineInfo.Add((lineIndex, line.StartMs, line.Text, watch.ElapsedMilliseconds));
+            lineIndex++;
+        }
+        totalWatch.Stop();
+
+        if (scanHeads)
+        {
+            EvaluateHeads(log, cache, aligner.NumLayers, aligner.NumHeads);
+            return;
+        }
+
+        if (rows.Count == 0) { log.Add("no comparable lines"); return; }
+
+        var globalOffset = Median(rows.Select(r => (double)r.ErrorMs).ToList());
+        var afterGlobal = rows.Select(r => Math.Abs(r.ErrorMs - globalOffset)).ToList();
+        var relative = new List<double>();
+        foreach (var group in rows.GroupBy(r => r.LineIndex))
+        {
+            double lineMedian = Median(group.Select(r => (double)r.ErrorMs).ToList());
+            foreach (var r in group) relative.Add(Math.Abs(r.ErrorMs - lineMedian));
+        }
+
+        // 逐字间隔相关性：相邻字开始时间的差，对齐结果 vs 真值
+        var gapPairs = new List<(double A, double T)>();
+        foreach (var group in rows.GroupBy(r => r.LineIndex))
+        {
+            var ordered = group.ToList();
+            for (int i = 1; i < ordered.Count; i++)
+            {
+                double ga = ordered[i].AlignMs - ordered[i - 1].AlignMs;
+                double gt = ordered[i].TruthMs - ordered[i - 1].TruthMs;
+                if (Math.Abs(gt) < 3000) gapPairs.Add((ga, gt));
+            }
+        }
+        double corr = 0;
+        if (gapPairs.Count > 2)
+        {
+            double ma = gapPairs.Average(p => p.A), mt = gapPairs.Average(p => p.T);
+            double cov = gapPairs.Sum(p => (p.A - ma) * (p.T - mt));
+            double va = Math.Sqrt(gapPairs.Sum(p => (p.A - ma) * (p.A - ma)));
+            double vt = Math.Sqrt(gapPairs.Sum(p => (p.T - mt) * (p.T - mt)));
+            if (va > 0 && vt > 0) corr = cov / (va * vt);
+        }
+
+        int overrun = 0, cut = 0;
+        foreach (var group in rows.GroupBy(r => r.LineIndex))
+        {
+            var info = lineInfo.FirstOrDefault(x => x.Index == group.Key);
+            var line = truth.Lines.Where(l => l.StartMs == info.StartMs).FirstOrDefault();
+            if (line == null) continue;
+            foreach (var r in group)
+            {
+                if (r.AlignMs > line.EndMs) overrun++;
+                if (r.AlignMs < line.StartMs - 200) cut++;
+            }
+        }
+
+        log.Add("");
+        log.Add($"lines={lineIndex} skipped={skipped} chars={rows.Count} total={totalWatch.ElapsedMilliseconds}ms");
+        log.Add($"infer/line: median={Median(rows.Select(r => (double)r.InferenceMs).ToList()):0}ms max={rows.Select(r => (double)r.InferenceMs).Max():0}ms");
+        log.Add($"raw |error|:   median={Median(rows.Select(r => (double)Math.Abs(r.ErrorMs)).ToList()):0}ms " +
+                $"p90={Percentile(rows.Select(r => (double)Math.Abs(r.ErrorMs)).ToList(), 90):0}ms");
+        log.Add($"global offset: {globalOffset:0}ms");
+        log.Add($"after offset:  median={Median(afterGlobal):0}ms p90={Percentile(afterGlobal, 90):0}ms");
+        log.Add($"within-line:   median={Median(relative):0}ms p90={Percentile(relative, 90):0}ms");
+        log.Add($"gap correlation: {corr:0.000}  (n={gapPairs.Count})");
+        log.Add($"overrun={overrun} cut={cut}");
+        log.Add("");
+        log.Add("per-line (first 15):");
+        foreach (var info in lineInfo.Take(15))
+        {
+            var g = rows.Where(r => r.LineIndex == info.Index).ToList();
+            if (g.Count == 0) continue;
+            double lm = Median(g.Select(r => (double)r.ErrorMs).ToList());
+            var text = info.Text.Length > 16 ? info.Text[..16] + "…" : info.Text;
+            log.Add($"  line {info.Index,2} start={info.StartMs,7} n={g.Count,2} median={lm,5:+0;-0;0} infer={info.InferMs,4}ms {text}");
+        }
+    }
+
+    private sealed class LineCache
+    {
+        public float[] Flat = Array.Empty<float>();
+        public int TTok;
+        public int Offset;
+        public int NLex;
+        public List<string> Pieces = new();
+        public int EncFrames;
+        public long WinStart;
+        public List<(string Ch, long StartMs)> Truth = new();
+        public int LineIndex;
+    }
+
+    /// <summary>Try every (layer, head) on the cached lines and rank by gap correlation, the metric
+    /// that actually matters for karaoke ("fast where it is fast").</summary>
+    private static void EvaluateHeads(List<string> log, List<LineCache> cache, int numLayers, int numHeads)
+    {
+        if (cache.Count == 0) { log.Add("no cached lines"); return; }
+        var ranked = new List<(double Corr, double MedAbs, int Layer, int Head)>();
+        for (int layer = 0; layer < numLayers; layer++)
+        {
+            for (int head = 0; head < numHeads; head++)
+            {
+                var rows = new List<Row>();
+                foreach (var c in cache)
+                {
+                    int perLayer = numHeads * c.TTok * WhisperAligner.EncFrames;
+                    int baseOff = layer * perLayer + head * c.TTok * WhisperAligner.EncFrames;
+                    int nLex = c.NLex;
+                    var lex = new float[nLex * WhisperAligner.EncFrames];
+                    for (int i = 0; i < nLex; i++)
+                    {
+                        int src = baseOff + (c.Offset + i) * WhisperAligner.EncFrames;
+                        int dst = i * WhisperAligner.EncFrames;
+                        float sum = 0f;
+                        for (int f = 0; f < WhisperAligner.EncFrames; f++) sum += c.Flat[src + f];
+                        float inv = sum > 0 ? 1f / sum : 0f;
+                        for (int f = 0; f < WhisperAligner.EncFrames; f++) lex[dst + f] = c.Flat[src + f] * inv;
+                    }
+                    var spans = WhisperDtw.ToCharacters(lex, nLex, c.EncFrames, WhisperAligner.EncFrames, c.Pieces, c.EncFrames);
+                    var chars = new List<(string Ch, int Start)>();
+                    foreach (var cs in spans) if (cs.Ch.Trim().Length > 0) chars.Add((cs.Ch, cs.Start));
+                    int n = Math.Min(chars.Count, c.Truth.Count);
+                    for (int i = 0; i < n; i++)
+                    {
+                        long aligned = c.WinStart + (long)chars[i].Start * WhisperAligner.FrameMs;
+                        rows.Add(new Row
+                        {
+                            LineIndex = c.LineIndex,
+                            Char = c.Truth[i].Ch,
+                            TruthMs = c.Truth[i].StartMs,
+                            AlignMs = aligned,
+                            ErrorMs = aligned - c.Truth[i].StartMs,
+                        });
+                    }
+                }
+                if (rows.Count < 8) continue;
+                double medAbs = Median(rows.Select(r => (double)Math.Abs(r.ErrorMs)).ToList());
+                double corr = GapCorrelation(rows);
+                ranked.Add((corr, medAbs, layer, head));
+            }
+        }
+        ranked.Sort((a, b) => b.Corr.CompareTo(a.Corr));
+        log.Add($"head ranking by gap correlation ({cache.Count} lines):");
+        for (int i = 0; i < Math.Min(20, ranked.Count); i++)
+        {
+            var r = ranked[i];
+            log.Add($"  L{r.Layer,2} H{r.Head,2} corr={r.Corr:0.000} medAbs={r.MedAbs:0}ms");
+        }
+    }
+
+    private static double GapCorrelation(List<Row> rows)
+    {
+        var pairs = new List<(double A, double T)>();
+        foreach (var group in rows.GroupBy(r => r.LineIndex))
+        {
+            var ordered = group.ToList();
+            for (int i = 1; i < ordered.Count; i++)
+            {
+                double ga = ordered[i].AlignMs - ordered[i - 1].AlignMs;
+                double gt = ordered[i].TruthMs - ordered[i - 1].TruthMs;
+                if (Math.Abs(gt) < 3000) pairs.Add((ga, gt));
+            }
+        }
+        if (pairs.Count < 3) return 0;
+        double ma = pairs.Average(p => p.A), mt = pairs.Average(p => p.T);
+        double cov = pairs.Sum(p => (p.A - ma) * (p.T - mt));
+        double va = Math.Sqrt(pairs.Sum(p => (p.A - ma) * (p.A - ma)));
+        double vt = Math.Sqrt(pairs.Sum(p => (p.T - mt) * (p.T - mt)));
+        return va > 0 && vt > 0 ? cov / (va * vt) : 0;
     }
 }

@@ -533,6 +533,16 @@ public static class Program
         {
             Services.AlignQa.RunCompareCache(args);
             return;
+        }
+        if (args.Contains("--whisper-align"))
+        {
+            Services.AlignQa.RunWhisperAlign(args);
+            return;
+        }
+        if (args.Contains("--whisper-qa"))
+        {
+            Services.AlignQa.RunWhisperQa(args);
+            return;
         }        if (args.Contains("--chrome-qa"))
         {
             RunChromeQa(app, args, settings);
