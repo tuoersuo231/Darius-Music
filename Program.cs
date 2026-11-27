@@ -2830,79 +2830,135 @@ public static class Program
 
     /// <summary>
     /// QA: 只测「源本身有没有逐字」。按关键词搜网易云拿 id，再依次问 AMLL / 酷狗 / 腾讯 / LRCLIB，
-    /// <b>本地对齐模型完全不参与</b>（这条路径上根本没有 ScheduleLocalAlign）。用来回答一个一直被
-    /// 搅混的问题：在线搜到的歌，到底有多少本来就带逐字时间，多少得靠本地算。
+    /// <b>本地对齐模型完全不参与</b>（这条路径上根本没有 ScheduleLocalAlign）。
+    ///
+    /// <c>--limit N</c> 每个关键词取前 N 首（默认 1）；<c>--concurrency N</c> 并行审计（默认 1）。
+    /// 歌一多必须并行，否则 300 首要跑半小时。
     /// </summary>
     private static void RunSourceAudit(string[] args, AppSettings settings)
     {
-        var lines = new List<string>
-        {
-            $"localAlignAvailable={Services.LocalAlign.Available} (this audit never schedules it)",
-            "keyword\tid\tdur\tneteaseLines\tyrcLines\tamll\tkugou\tqq\tlrclib\twinner",
-        };
         Services.NeteaseApi.Cookie = settings.NeteaseCookie;
         Services.NeteaseApi.Quality = settings.NeteaseQuality;
 
-        int total = 0, solved = 0;
-        foreach (var keyword in args.SkipWhile(a => a != "--source-audit").Skip(1)
-                     .TakeWhile(a => !a.StartsWith("--")))
+        int limit = int.TryParse(Arg(args, "--limit"), out var perKeyword)
+            ? Math.Clamp(perKeyword, 1, 100)
+            : 1;
+        int concurrency = int.TryParse(Arg(args, "--concurrency"), out var workers)
+            ? Math.Clamp(workers, 1, 16)
+            : 1;
+        var keywords = args.SkipWhile(a => a != "--source-audit").Skip(1)
+            .TakeWhile(a => !a.StartsWith("--")).ToList();
+
+        // 1) 搜歌：每个关键词取 limit 首，按网易云 id 去重。
+        var targets = new List<(string Keyword, Models.Song Song)>();
+        var seen = new HashSet<long>();
+        foreach (var keyword in keywords)
         {
-            total++;
-            Models.Song? song = null;
             try
             {
-                var page = Services.NeteaseApi.SearchAsync(keyword, 1).GetAwaiter().GetResult();
-                song = page.Songs.FirstOrDefault();
+                var page = Services.NeteaseApi.SearchAsync(keyword, limit).GetAwaiter().GetResult();
+                foreach (var song in page.Songs)
+                    if (song.NeteaseId > 0 && seen.Add(song.NeteaseId))
+                        targets.Add((keyword, song));
             }
             catch { }
-            if (song == null)
-            {
-                lines.Add($"{keyword}\t-\t-\t-\t-\t-\t-\t-\t-\tnot-found");
-                continue;
-            }
-
-            int seconds = (int)Math.Round(song.Duration.TotalSeconds);
-            Models.LyricDocument? baseDoc = null;
-            try
-            {
-                var text = Task.Run(() => Services.NeteaseApi.LyricAsync(song.NeteaseId))
-                    .GetAwaiter().GetResult();
-                if (!string.IsNullOrWhiteSpace(text)) baseDoc = Services.LrcParser.Parse(text);
-            }
-            catch { }
-
-            // 四个源全部真问一遍（不看是否已经命中），否则表格里的 "-" 分不清是"没有"还是"没问"。
-            var amll = TryCall(() => Services.AmllLyrics.EnsureAsync(song.NeteaseId, baseDoc,
-                TimeSpan.FromSeconds(10)));
-            var kugou = TryCall(() => Services.KugouLyric.EnsureAsync(song.NeteaseId, song.DisplayTitle,
-                song.DisplayArtist, seconds, baseDoc, TimeSpan.FromSeconds(15)));
-            var qq = TryCall(() => Services.QqLyric.EnsureAsync(song.NeteaseId, song.DisplayTitle,
-                song.DisplayArtist, baseDoc, seconds, TimeSpan.FromSeconds(20)));
-            var lrclib = TryCall(() => Services.LrclibLyric.EnsureAsync(song.NeteaseId, song.DisplayTitle,
-                song.DisplayArtist, seconds, baseDoc, TimeSpan.FromSeconds(14)));
-
-            int yrc = baseDoc?.Lines.Count(l => l.HasWordTiming) ?? 0;
-            string winner = amll != null ? "amll"
-                : kugou != null ? "kugou"
-                : qq != null ? "qq"
-                : lrclib != null ? "lrclib"
-                : yrc > 0 ? "netease-yrc"
-                : "NONE";
-            if (winner != "NONE") solved++;
-            lines.Add($"{keyword}\t{song.NeteaseId}\t{seconds}s\t{baseDoc?.Lines.Count ?? 0}\t{yrc}" +
-                      $"\t{Tally(amll)}\t{Tally(kugou)}\t{Tally(qq)}\t{Tally(lrclib)}\t{winner}");
         }
-        lines.Add($"solved={solved}/{total}");
+
+        // 2) 逐首审计。四家源各自持 HttpClient，miss 记录已改成 ConcurrentDictionary，可以并行。
+        var results = new string[targets.Count];
+        Parallel.For(0, targets.Count,
+            new ParallelOptions { MaxDegreeOfParallelism = concurrency },
+            i => results[i] = AuditOne(targets[i].Keyword, targets[i].Song));
+
+        // 3) 汇总
+        var lines = new List<string>
+        {
+            $"localAlignAvailable={Services.LocalAlign.Available} (this audit never schedules it)",
+            $"keywords={keywords.Count} songs={targets.Count} limit={limit} concurrency={concurrency}",
+            "keyword\tid\tdur\tneteaseLines\tyrcLines\tamll\tkugou\tqq\tlrclib\twinner\tprobe",
+        };
+        lines.AddRange(results);
+
+        int solved = 0, none = 0;
+        var wins = new Dictionary<string, int>(StringComparer.Ordinal);
+        var hits = new Dictionary<string, int>(StringComparer.Ordinal)
+        {
+            ["amll"] = 0, ["kugou"] = 0, ["qq"] = 0, ["lrclib"] = 0, ["yrc"] = 0,
+        };
+        foreach (var row in results)
+        {
+            var cells = row.Split('\t');
+            var winner = cells.Length > 9 ? cells[9] : "NONE";
+            if (winner == "NONE") none++; else solved++;
+            wins[winner] = wins.TryGetValue(winner, out var n) ? n + 1 : 1;
+            if (cells.Length > 5 && cells[5].StartsWith("+", StringComparison.Ordinal)) hits["amll"]++;
+            if (cells.Length > 6 && cells[6].StartsWith("+", StringComparison.Ordinal)) hits["kugou"]++;
+            if (cells.Length > 7 && cells[7].StartsWith("+", StringComparison.Ordinal)) hits["qq"]++;
+            if (cells.Length > 8 && cells[8].StartsWith("+", StringComparison.Ordinal)) hits["lrclib"]++;
+            if (cells.Length > 4 && int.TryParse(cells[4], out var yrcCount) && yrcCount > 0) hits["yrc"]++;
+        }
+        lines.Add($"solved={solved}/{targets.Count} none={none}");
+        lines.Add("wins: " + string.Join(" ", wins.OrderByDescending(kv => kv.Value)
+            .Select(kv => $"{kv.Key}={kv.Value}")));
+        lines.Add("any-hit: " + string.Join(" ", hits.Select(kv => $"{kv.Key}={kv.Value}")));
         File.WriteAllLines(Arg(args, "--report") ?? "source-audit.txt", lines);
-        return;
+    }
 
-        static string Tally(Models.LyricDocument? doc)
+    private static string AuditOne(string keyword, Models.Song song)
+    {
+        int seconds = (int)Math.Round(song.Duration.TotalSeconds);
+        Models.LyricDocument? baseDoc = null;
+        try
         {
-            if (doc == null) return "-";
-            int timed = doc.Lines.Count(l => l.HasWordTiming);
-            int words = doc.Lines.Sum(l => l.Words.Count);
-            return timed > 0 ? $"+{timed}/{words}" : "?";
+            var text = Task.Run(() => Services.NeteaseApi.LyricAsync(song.NeteaseId))
+                .GetAwaiter().GetResult();
+            if (!string.IsNullOrWhiteSpace(text)) baseDoc = Services.LrcParser.Parse(text);
         }
+        catch { }
+
+        // 四个源全部真问一遍（不看是否已经命中），否则表格里的 "-" 分不清是"没有"还是"没问"。
+        var amll = TryCall(() => Services.AmllLyrics.EnsureAsync(song.NeteaseId, baseDoc,
+            TimeSpan.FromSeconds(10)));
+        var kugou = TryCall(() => Services.KugouLyric.EnsureAsync(song.NeteaseId, song.DisplayTitle,
+            song.DisplayArtist, seconds, baseDoc, TimeSpan.FromSeconds(15)));
+        var qq = TryCall(() => Services.QqLyric.EnsureAsync(song.NeteaseId, song.DisplayTitle,
+            song.DisplayArtist, baseDoc, seconds, TimeSpan.FromSeconds(20)));
+        var lrclib = TryCall(() => Services.LrclibLyric.EnsureAsync(song.NeteaseId, song.DisplayTitle,
+            song.DisplayArtist, seconds, baseDoc, TimeSpan.FromSeconds(14)));
+
+        int yrc = baseDoc?.Lines.Count(l => l.HasWordTiming) ?? 0;
+        string winner = amll != null ? "amll"
+            : kugou != null ? "kugou"
+            : qq != null ? "qq"
+            : lrclib != null ? "lrclib"
+            : yrc > 0 ? "netease-yrc"
+            : "NONE";
+
+        // NONE 的时候再问一遍，这次不带网易云那份当护栏：用来区分"源里真的没有"和"源里有、
+        // 但被文字/时间护栏拒了"。护栏已经吃掉过两份正确的歌词（打上花火、海阔天空），值得每次都验。
+        string probe = "";
+        if (winner == "NONE")
+        {
+            var loose = TryCall(() => Services.KugouLyric.EnsureAsync(song.NeteaseId, song.DisplayTitle,
+                    song.DisplayArtist, seconds, null, TimeSpan.FromSeconds(15)))
+                ?? TryCall(() => Services.QqLyric.EnsureAsync(song.NeteaseId, song.DisplayTitle,
+                    song.DisplayArtist, null, seconds, TimeSpan.FromSeconds(20)))
+                ?? TryCall(() => Services.AmllLyrics.EnsureAsync(song.NeteaseId, null, TimeSpan.FromSeconds(10)))
+                ?? TryCall(() => Services.LrclibLyric.EnsureAsync(song.NeteaseId, song.DisplayTitle,
+                    song.DisplayArtist, seconds, null, TimeSpan.FromSeconds(14)));
+            probe = loose == null ? "none" : $"loose+{loose.Lines.Count(l => l.HasWordTiming)}";
+        }
+
+        return $"{keyword}\t{song.NeteaseId}\t{seconds}s\t{baseDoc?.Lines.Count ?? 0}\t{yrc}" +
+               $"\t{Tally(amll)}\t{Tally(kugou)}\t{Tally(qq)}\t{Tally(lrclib)}\t{winner}\t{probe}";
+    }
+
+    private static string Tally(Models.LyricDocument? doc)
+    {
+        if (doc == null) return "-";
+        int timed = doc.Lines.Count(l => l.HasWordTiming);
+        int words = doc.Lines.Sum(l => l.Words.Count);
+        return timed > 0 ? $"+{timed}/{words}" : "?";
     }
 
     /// <summary>QA: walks the whole word-level ladder (AMLL → 酷狗 → 腾讯 → LRCLIB) for one NetEase id,

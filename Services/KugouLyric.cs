@@ -38,7 +38,7 @@ public static class KugouLyric
     private static readonly HttpClient Http = CreateHttp();
 
     /// <summary>Songs with no KRC, so a replay does not search again.</summary>
-    private static readonly HashSet<long> Misses = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<long, byte> Misses = new();
 
     public sealed record Hit(string Hash, string Name, string Singer, int Seconds);
 
@@ -65,7 +65,7 @@ public static class KugouLyric
     {
         var cached = TryCached(songId, baseDoc);
         if (cached != null) return cached;
-        if (songId <= 0 || Misses.Contains(songId)) return null;
+        if (songId <= 0 || Misses.ContainsKey(songId)) return null;
 
         var work = Task.Run(() =>
         {
@@ -94,7 +94,7 @@ public static class KugouLyric
         var result = await work.ConfigureAwait(false);
         if (result == null)
         {
-            Misses.Add(songId);
+            Misses.TryAdd(songId, 0);
             return null;
         }
         QqLyric.CarryTranslations(result, baseDoc);

@@ -27,7 +27,7 @@ public static class LrclibLyric
     private static readonly HttpClient Http = CreateHttp();
 
     /// <summary>Songs LRCLIB has nothing usable for, so a replay does not search again.</summary>
-    private static readonly HashSet<long> Misses = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<long, byte> Misses = new();
 
     private static HttpClient CreateHttp()
     {
@@ -62,7 +62,7 @@ public static class LrclibLyric
     {
         var cached = TryCached(songId, baseDoc);
         if (cached != null) return cached;
-        if (songId <= 0 || string.IsNullOrWhiteSpace(title) || Misses.Contains(songId)) return null;
+        if (songId <= 0 || string.IsNullOrWhiteSpace(title) || Misses.ContainsKey(songId)) return null;
 
         var work = Task.Run(() => Fetch(songId, title, artist, expectedSeconds, baseDoc));
         var finished = await Task.WhenAny(work, Task.Delay(budget ?? TimeSpan.FromSeconds(12)))
@@ -71,7 +71,7 @@ public static class LrclibLyric
         var result = await work.ConfigureAwait(false);
         if (result == null)
         {
-            Misses.Add(songId);
+            Misses.TryAdd(songId, 0);
             return null;
         }
         QqLyric.CarryTranslations(result, baseDoc);

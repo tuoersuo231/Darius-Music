@@ -24,7 +24,7 @@ public static class AmllLyrics
     private static readonly HttpClient Http = CreateHttp();
 
     /// <summary>Songs known to be absent from the DB, so a replay does not ask again.</summary>
-    private static readonly HashSet<long> Misses = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<long, byte> Misses = new();
 
     private static HttpClient CreateHttp()
     {
@@ -46,7 +46,7 @@ public static class AmllLyrics
     {
         var cached = TryCached(ncmId, baseDoc);
         if (cached != null) return cached;
-        if (ncmId <= 0 || Misses.Contains(ncmId)) return null;
+        if (ncmId <= 0 || Misses.ContainsKey(ncmId)) return null;
 
         var work = Task.Run(() =>
         {
@@ -80,7 +80,7 @@ public static class AmllLyrics
         var result = await work.ConfigureAwait(false);
         if (result == null)
         {
-            Misses.Add(ncmId);
+            Misses.TryAdd(ncmId, 0);
             return null;
         }
         CarryTranslations(result, baseDoc);
