@@ -479,6 +479,11 @@ public static class Program
             RunKeyQa(app, args, settings);
             return;
         }
+        if (args.Contains("--swatch-qa"))
+        {
+            RunSwatchQa(app, args, settings);
+            return;
+        }
         if (args.Contains("--hotkey-shot"))
         {
             string path = Arg(args, "--hotkey-shot") ?? "hotkeys.png";
@@ -3321,6 +3326,47 @@ public static class Program
         lines.Add("1s later:      " + ctl.Playback.DebugLoad);
         lines.Add("         ui:   " + win.DebugProgress);
         File.WriteAllLines(Path.Combine(dir, "resume-window.txt"), lines);
+        win.Close();
+        app.Shutdown();
+    }
+
+    /// <summary>QA: 调一次色是否挤掉一个默认色、总数不变、常用色落盘（--swatch-qa）。</summary>
+    private static void RunSwatchQa(Application app, string[] args, AppSettings settings)
+    {
+        string dir = Arg(args, "--swatch-qa") ?? "swatchqa";
+        Directory.CreateDirectory(dir);
+        var lines = new List<string>();
+        var win = new AppearanceWindow(settings, _ => { });
+        win.Show();
+        for (int i = 0; i < 6; i++) PumpFrames(80);
+        lines.Add("initial  " + win.DebugPresets);
+
+        win.DebugCommitSurface("A1B2C3");
+        PumpFrames(120);
+        lines.Add("after 1  " + win.DebugPresets);
+        // 截图要看「常用背景色」那张卡，它在滚动区底部。
+        foreach (var viewer in Descendants(win).OfType<System.Windows.Controls.ScrollViewer>())
+            viewer.ScrollToEnd();
+        PumpFrames(250);
+        Save(win, Path.Combine(dir, "swatch.png"));
+
+        var palette = new[]
+        {
+            "112233", "445566", "778899", "AABBCC", "DDEEFF", "123456", "654321",
+            "ABCDEF", "FEDCBA", "0F0F0F", "F0F0F0", "999999",
+        };
+        foreach (var hex in palette)
+        {
+            win.DebugCommitSurface(hex);
+            PumpFrames(60);
+        }
+        lines.Add("after 13 " + win.DebugPresets);
+        lines.Add("surface=" + settings.ThemeSurface);
+
+        var reread = SettingsStore.Load();
+        lines.Add("persisted=[" + string.Join(",", reread.RecentSurfaceColors ?? new List<string>()) + "]");
+
+        File.WriteAllLines(Path.Combine(dir, "swatch.txt"), lines);
         win.Close();
         app.Shutdown();
     }

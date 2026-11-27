@@ -36,14 +36,7 @@ public partial class AppearanceWindow : Window
         _onApply = onApply;
         _onPreview = onPreview ?? (() => onApply(settings));
 
-        for (int i = 0; i < SurfacePresets.Length; i++)
-        {
-            var hex = SurfacePresets[i];
-            surfacePresets.Children.Add(Swatch(hex, SurfaceNames[i], s => s.ThemeSurface = hex));
-        }
-        // 透明：面板不再铺自己的底色，封面/背景图整面透出来。存成 8 位 AARRGGBB（"00RRGGBB"），
-        // 颜色本身留着给文字和强调色算对比度。
-        surfacePresets.Children.Add(TransparentSwatch());
+        RebuildSurfacePresets();
 
         sldThemeOpacity.ValueChanged += (_, e) =>
         {
@@ -94,6 +87,54 @@ public partial class AppearanceWindow : Window
             RefreshFields();
         };
         return button;
+    }
+
+    /// <summary>
+    /// 「常用背景色」那一排：用户调过的颜色（最近的在前）＋ 剩下的默认色，总数固定等于默认色数量，
+    /// 最后永远是「透明」。每调一次色，队首多一个，队尾就少一个默认色。
+    /// </summary>
+    private void RebuildSurfacePresets()
+    {
+        surfacePresets.Children.Clear();
+        int total = SurfacePresets.Length;
+        var customs = (_settings.RecentSurfaceColors ?? new List<string>())
+            .Select(h => Services.Palette.Normalize(h, ""))
+            .Where(h => h.Length is 6 or 8)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(total)
+            .ToList();
+        foreach (var hex in customs)
+            surfacePresets.Children.Add(Swatch(hex, "#" + hex, s => s.ThemeSurface = hex));
+        for (int i = 0; i < total - customs.Count; i++)
+        {
+            var hex = SurfacePresets[i];
+            surfacePresets.Children.Add(Swatch(hex, SurfaceNames[i], s => s.ThemeSurface = hex));
+        }
+        // 透明：面板不再铺自己的底色，封面/背景图整面透出来。存成 8 位 AARRGGBB（"00RRGGBB"），
+        // 颜色本身留着给文字和强调色算对比度。
+        surfacePresets.Children.Add(TransparentSwatch());
+    }
+
+    /// <summary>刚调好的颜色记进常用色：同一颜色只留一份并提到最前，超过默认色数量就丢掉最旧的。</summary>
+    private void RememberSurface(string hex)
+    {
+        var normalized = Services.Palette.Normalize(hex, "");
+        if (normalized.Length == 0) return;
+        var list = _settings.RecentSurfaceColors ??= new List<string>();
+        list.RemoveAll(h => string.Equals(h, normalized, StringComparison.OrdinalIgnoreCase));
+        list.Insert(0, normalized);
+        int max = SurfacePresets.Length;
+        if (list.Count > max) list.RemoveRange(max, list.Count - max);
+        SettingsStore.Save(_settings);
+        RebuildSurfacePresets();
+    }
+
+    /// <summary>一次「调完色」的完整动作：落设置、记常用色、刷新这一排和色块。</summary>
+    private void CommitSurfaceColor(string hex)
+    {
+        Apply(s => s.ThemeSurface = hex);
+        RememberSurface(hex);
+        RefreshFields();
     }
 
     /// <summary>The 透明 chip: keeps the current colour (it still drives the ink and the accent) but
@@ -210,14 +251,20 @@ public partial class AppearanceWindow : Window
         }, persist: false);
         panel.Committed += hex =>
         {
-            Apply(s =>
+            if (field == "ThemeSurface")
             {
-                if (field == "ThemeAccent") s.ThemeAccent = hex;
-                else s.ThemeSurface = hex;
-            });
+                CommitSurfaceColor(hex);
+            }
+            else
+            {
+                Apply(s =>
+                {
+                    if (field == "ThemeAccent") s.ThemeAccent = hex;
+                });
+                RefreshFields();
+            }
             pickerCard.Visibility = Visibility.Collapsed;
             pickerHost.Content = null;
-            RefreshFields();
         };
         panel.Cancelled += () =>
         {
@@ -347,5 +394,23 @@ public partial class AppearanceWindow : Window
     {
         Apply(s => s.ThemeImage = "");
         RefreshFields();
+    }
+
+    // ---- QA (--swatch-qa) ---------------------------------------------------------------
+    /// <summary>Same path as closing the colour picker with 确定.</summary>
+    internal void DebugCommitSurface(string hex) => CommitSurfaceColor(hex);
+
+    /// <summary>这一排现在长什么样：chip 数量（含透明）、颜色顺序、设置里记的常用色。</summary>
+    internal string DebugPresets
+    {
+        get
+        {
+            var chips = surfacePresets.Children.OfType<Button>().ToList();
+            var colors = chips.Select(b => b.Background is SolidColorBrush brush
+                ? $"{brush.Color.R:X2}{brush.Color.G:X2}{brush.Color.B:X2}"
+                : "checker").ToList();
+            return $"chips={chips.Count} colors=[{string.Join(",", colors)}] " +
+                   $"recent=[{string.Join(",", _settings.RecentSurfaceColors ?? new List<string>())}]";
+        }
     }
 }

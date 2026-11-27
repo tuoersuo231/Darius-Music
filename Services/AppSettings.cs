@@ -91,6 +91,12 @@ public sealed class AppSettings
     public double ThemeOpacity { get; set; } = 100;   // 背景不透明度 0..100
     public double ThemeBlur { get; set; } = 0;        // 背景磨砂 0..60 px
     public string ThemeImage { get; set; } = "";      // 自定义背景图，空 = 不用图
+
+    /// <summary>
+    /// 用户自己调过的背景色（最近的在前）。界面外观的「常用背景色」里，每多一个就把最后一个默认色挤掉，
+    /// 所以这一排的总数始终等于默认色的数量。存 6 位或 8 位（8 位带 alpha，透明也是这么存的）。
+    /// </summary>
+    public List<string> RecentSurfaceColors { get; set; } = new();
     public string UpdateFeed { get; set; } = "";      // 更新清单来源：文件夹或 http 地址
 
     // ---- 正在播放窗口（与桌面歌词完全独立的一套参数，互不影响） ----
@@ -269,6 +275,12 @@ public sealed class AppSettings
         ThemeOpacity = Math.Clamp(ThemeOpacity, 0, 100),
         ThemeBlur = Math.Clamp(ThemeBlur, 0, 60),
         ThemeImage = ThemeImage ?? "",
+        RecentSurfaceColors = (RecentSurfaceColors ?? new List<string>())
+            .Select(h => (h ?? "").Trim().TrimStart('#').ToUpperInvariant())
+            .Where(h => (h.Length == 6 || h.Length == 8) && h.All(Uri.IsHexDigit))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(24)
+            .ToList(),
         UpdateFeed = UpdateFeed ?? "",
         PlayerFontSize = Math.Clamp(PlayerFontSize, 18, 96),
         PlayerVisibleLines = Math.Clamp(PlayerVisibleLines, 3, 20),
