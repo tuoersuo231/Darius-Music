@@ -25,6 +25,7 @@ public sealed class SpectrumService : IDisposable
     private float[] _slow = Array.Empty<float>();
     private (int Start, int End)[] _ranges = Array.Empty<(int, int)>();
     private int _bars;
+    private int _bands;
     private float _fastDecay = 1f;
     private float _slowDecay = 1f;
     private double[] _db = Array.Empty<double>();
@@ -108,12 +109,15 @@ public sealed class SpectrumService : IDisposable
         {
             _options = options;
             _bars = Math.Clamp(options.Bars, 4, 128);
-            if (_fast.Length != _bars)
+            // 镜像模式下左右两半共用一个频段数组：N 根柱子只对应 (N+1)/2 个频段。
+            // 以前这里按 N 建频段，结果镜像时只画得到 600~2200 Hz，右半边的频段永远没被读出来。
+            _bands = options.Mirror ? Math.Max(1, (_bars + 1) / 2) : _bars;
+            if (_fast.Length != _bands)
             {
-                _fast = new float[_bars];
-                _slow = new float[_bars];
+                _fast = new float[_bands];
+                _slow = new float[_bands];
             }
-            if (_db.Length != _bars) _db = new double[_bars];
+            if (_db.Length != _bands) _db = new double[_bands];
             RebuildRanges();
             UpdateDecay();
         }
@@ -293,7 +297,7 @@ public sealed class SpectrumService : IDisposable
         float peak = 0;
         double frameMax = double.NegativeInfinity;
 
-        for (int bar = 0; bar < _bars; bar++)
+        for (int bar = 0; bar < _bands; bar++)
         {
             var (start, end) = _ranges[bar];
             double loudest = 0;
@@ -327,7 +331,7 @@ public sealed class SpectrumService : IDisposable
             gain = _gainDb;
         }
 
-        for (int bar = 0; bar < _bars; bar++)
+        for (int bar = 0; bar < _bands; bar++)
         {
             float value = (float)Math.Clamp((_db[bar] + gain - floorDb) / spanDb, 0, 1);
             if (value > peak) peak = value;
@@ -354,7 +358,7 @@ public sealed class SpectrumService : IDisposable
     /// <summary>对数分频：低频条窄、高频条宽，和皮肤 600–8000 Hz 的听感一致。</summary>
     private void RebuildRanges()
     {
-        int bars = Math.Max(1, _bars);
+        int bars = Math.Max(1, _bands);
         var ranges = new (int, int)[bars];
         double binHz = _sampleRate / FftSize;
         double low = Math.Max(20, Math.Min(_options.FreqMin, _options.FreqMax - 20));

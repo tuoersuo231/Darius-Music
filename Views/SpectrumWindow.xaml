@@ -1,0 +1,192 @@
+<Window x:Class="CurrentLyrics.Views.SpectrumWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:controls="clr-namespace:CurrentLyrics.Controls"
+        Title="频谱设置" Width="470" Height="760" MinWidth="420" MinHeight="480"
+        WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource WindowWashBrush}"
+        FontFamily="{StaticResource UiFont}"
+        Foreground="{DynamicResource TextBrush}"
+        Icon="/Assets/app.png">
+  <Grid>
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="*" />
+    </Grid.RowDefinitions>
+
+    <Border BorderBrush="{DynamicResource HairlineBrush}" BorderThickness="0,0,0,1" Padding="26,22,26,12">
+      <StackPanel>
+        <TextBlock Text="频谱设置" Style="{StaticResource H1}" />
+        <TextBlock Text="拖滑块立刻生效，不用重启；停手一秒自动存进 data\spectrum.json。"
+                   Style="{StaticResource Caption}" Margin="0,5,0,0" TextWrapping="Wrap" />
+      </StackPanel>
+    </Border>
+
+    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Margin="20,14,14,16">
+      <StackPanel Margin="0,0,6,10">
+
+        <!-- 开关 -->
+        <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="14" Padding="18,10" BorderBrush="{DynamicResource HairlineBrush}" BorderThickness="1">
+          <StackPanel>
+            <Grid Margin="0,6">
+              <TextBlock Text="启用频谱" FontSize="13" VerticalAlignment="Center" />
+              <CheckBox x:Name="chkEnabled" Style="{StaticResource Switch}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+            </Grid>
+            <Grid Margin="0,6">
+              <StackPanel VerticalAlignment="Center" Margin="0,0,86,0">
+                <TextBlock Text="浮在界面之上" FontSize="13" />
+                <TextBlock Text="开：柱子压在界面上（会挡播放条）。关：夹在壁纸和界面之间，界面自动半透明。" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,2,0,0" />
+              </StackPanel>
+              <CheckBox x:Name="chkOverlay" Style="{StaticResource Switch}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+            </Grid>
+            <Grid Margin="0,6">
+              <StackPanel VerticalAlignment="Center" Margin="0,0,86,0">
+                <TextBlock Text="自动增益" FontSize="13" />
+                <TextBlock Text="让当前最响的那条自动顶到 92%，音量小也不会缩成一条线。" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,2,0,0" />
+              </StackPanel>
+              <CheckBox x:Name="chkAutoGain" Style="{StaticResource Switch}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+            </Grid>
+            <Grid Margin="0,6">
+              <TextBlock Text="镜像（中间低、两边高）" FontSize="13" VerticalAlignment="Center" />
+              <CheckBox x:Name="chkMirror" Style="{StaticResource Switch}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+            </Grid>
+            <Grid Margin="0,6">
+              <TextBlock Text="画残影" FontSize="13" VerticalAlignment="Center" />
+              <CheckBox x:Name="chkGhost" Style="{StaticResource Switch}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+            </Grid>
+          </StackPanel>
+        </Border>
+
+        <!-- 尺寸 -->
+        <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="14" Padding="18,10" BorderBrush="{DynamicResource HairlineBrush}" BorderThickness="1" Margin="0,12,0,0">
+          <StackPanel>
+            <StackPanel Margin="0,8">
+              <Grid>
+                <TextBlock Text="高度" FontSize="13" />
+                <TextBlock x:Name="txtHeight" HorizontalAlignment="Right" FontSize="12" Foreground="{DynamicResource AccentBrush}" />
+              </Grid>
+              <controls:DragOnlySlider x:Name="sldHeight" Style="{StaticResource ThinSlider}" Margin="0,6,0,0" />
+            </StackPanel>
+            <StackPanel Margin="0,8">
+              <Grid>
+                <TextBlock Text="条数" FontSize="13" />
+                <TextBlock x:Name="txtBars" HorizontalAlignment="Right" FontSize="12" Foreground="{DynamicResource AccentBrush}" />
+              </Grid>
+              <controls:DragOnlySlider x:Name="sldBars" Style="{StaticResource ThinSlider}" Margin="0,6,0,0" />
+            </StackPanel>
+            <StackPanel Margin="0,8">
+              <Grid>
+                <TextBlock Text="柱间缝隙" FontSize="13" />
+                <TextBlock x:Name="txtGap" HorizontalAlignment="Right" FontSize="12" Foreground="{DynamicResource AccentBrush}" />
+              </Grid>
+              <controls:DragOnlySlider x:Name="sldGap" Style="{StaticResource ThinSlider}" Margin="0,6,0,0" />
+            </StackPanel>
+            <StackPanel Margin="0,8">
+              <Grid>
+                <TextBlock Text="圆角" FontSize="13" />
+                <TextBlock x:Name="txtRadius" HorizontalAlignment="Right" FontSize="12" Foreground="{DynamicResource AccentBrush}" />
+              </Grid>
+              <controls:DragOnlySlider x:Name="sldRadius" Style="{StaticResource ThinSlider}" Margin="0,6,0,0" />
+            </StackPanel>
+            <StackPanel Margin="0,8">
+              <Grid>
+                <TextBlock Text="整条不透明度" FontSize="13" />
+                <TextBlock x:Name="txtOpacity" HorizontalAlignment="Right" FontSize="12" Foreground="{DynamicResource AccentBrush}" />
+              </Grid>
+              <controls:DragOnlySlider x:Name="sldOpacity" Style="{StaticResource ThinSlider}" Margin="0,6,0,0" />
+            </StackPanel>
+          </StackPanel>
+        </Border>
+
+        <!-- 颜色 -->
+        <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="14" Padding="18,14" BorderBrush="{DynamicResource HairlineBrush}" BorderThickness="1" Margin="0,12,0,0">
+          <StackPanel>
+            <Grid>
+              <TextBlock Text="颜色" FontSize="13" VerticalAlignment="Center" />
+              <TextBlock x:Name="txtColor" HorizontalAlignment="Right" FontSize="12" Foreground="{DynamicResource AccentBrush}" VerticalAlignment="Center" />
+            </Grid>
+            <WrapPanel Margin="0,10,0,0">
+              <Border Tag="#C77DFF" Width="34" Height="24" CornerRadius="6" Margin="0,0,8,8" Cursor="Hand" Background="#C77DFF" MouseLeftButtonUp="OnSwatchClick" />
+              <Border Tag="#00E5FF" Width="34" Height="24" CornerRadius="6" Margin="0,0,8,8" Cursor="Hand" Background="#00E5FF" MouseLeftButtonUp="OnSwatchClick" />
+              <Border Tag="#7DFF9E" Width="34" Height="24" CornerRadius="6" Margin="0,0,8,8" Cursor="Hand" Background="#7DFF9E" MouseLeftButtonUp="OnSwatchClick" />
+              <Border Tag="#FFD166" Width="34" Height="24" CornerRadius="6" Margin="0,0,8,8" Cursor="Hand" Background="#FFD166" MouseLeftButtonUp="OnSwatchClick" />
+              <Border Tag="#FF7D9C" Width="34" Height="24" CornerRadius="6" Margin="0,0,8,8" Cursor="Hand" Background="#FF7D9C" MouseLeftButtonUp="OnSwatchClick" />
+              <Border Tag="#FFFFFF" Width="34" Height="24" CornerRadius="6" Margin="0,0,8,8" Cursor="Hand" Background="#FFFFFF" MouseLeftButtonUp="OnSwatchClick" />
+              <Border Tag="#8FA2FF" Width="34" Height="24" CornerRadius="6" Margin="0,0,8,8" Cursor="Hand" Background="#8FA2FF" MouseLeftButtonUp="OnSwatchClick" />
+              <Border Tag="#FF9F45" Width="34" Height="24" CornerRadius="6" Margin="0,0,8,8" Cursor="Hand" Background="#FF9F45" MouseLeftButtonUp="OnSwatchClick" />
+            </WrapPanel>
+          </StackPanel>
+        </Border>
+
+        <!-- 频段 -->
+        <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="14" Padding="18,10" BorderBrush="{DynamicResource HairlineBrush}" BorderThickness="1" Margin="0,12,0,0">
+          <StackPanel>
+            <StackPanel Margin="0,8">
+              <Grid>
+                <TextBlock Text="起始频率" FontSize="13" />
+                <TextBlock x:Name="txtFreqMin" HorizontalAlignment="Right" FontSize="12" Foreground="{DynamicResource AccentBrush}" />
+              </Grid>
+              <controls:DragOnlySlider x:Name="sldFreqMin" Style="{StaticResource ThinSlider}" Margin="0,6,0,0" />
+            </StackPanel>
+            <StackPanel Margin="0,8">
+              <Grid>
+                <TextBlock Text="截止频率" FontSize="13" />
+                <TextBlock x:Name="txtFreqMax" HorizontalAlignment="Right" FontSize="12" Foreground="{DynamicResource AccentBrush}" />
+              </Grid>
+              <controls:DragOnlySlider x:Name="sldFreqMax" Style="{StaticResource ThinSlider}" Margin="0,6,0,0" />
+            </StackPanel>
+            <StackPanel Margin="0,8">
+              <Grid>
+                <TextBlock Text="逐条增益（补高频）" FontSize="13" />
+                <TextBlock x:Name="txtBoost" HorizontalAlignment="Right" FontSize="12" Foreground="{DynamicResource AccentBrush}" />
+              </Grid>
+              <controls:DragOnlySlider x:Name="sldBoost" Style="{StaticResource ThinSlider}" Margin="0,6,0,0" />
+            </StackPanel>
+          </StackPanel>
+        </Border>
+
+        <!-- 动态 -->
+        <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="14" Padding="18,10" BorderBrush="{DynamicResource HairlineBrush}" BorderThickness="1" Margin="0,12,0,0">
+          <StackPanel>
+            <StackPanel Margin="0,8">
+              <Grid>
+                <TextBlock Text="门限（低于它算 0）" FontSize="13" />
+                <TextBlock x:Name="txtFloor" HorizontalAlignment="Right" FontSize="12" Foreground="{DynamicResource AccentBrush}" />
+              </Grid>
+              <controls:DragOnlySlider x:Name="sldFloor" Style="{StaticResource ThinSlider}" Margin="0,6,0,0" />
+            </StackPanel>
+            <StackPanel Margin="0,8">
+              <Grid>
+                <TextBlock Text="动态范围" FontSize="13" />
+                <TextBlock x:Name="txtSpan" HorizontalAlignment="Right" FontSize="12" Foreground="{DynamicResource AccentBrush}" />
+              </Grid>
+              <controls:DragOnlySlider x:Name="sldSpan" Style="{StaticResource ThinSlider}" Margin="0,6,0,0" />
+            </StackPanel>
+            <StackPanel Margin="0,8">
+              <Grid>
+                <TextBlock Text="实心条回落" FontSize="13" />
+                <TextBlock x:Name="txtFast" HorizontalAlignment="Right" FontSize="12" Foreground="{DynamicResource AccentBrush}" />
+              </Grid>
+              <controls:DragOnlySlider x:Name="sldFast" Style="{StaticResource ThinSlider}" Margin="0,6,0,0" />
+            </StackPanel>
+            <StackPanel Margin="0,8">
+              <Grid>
+                <TextBlock Text="残影回落" FontSize="13" />
+                <TextBlock x:Name="txtSlow" HorizontalAlignment="Right" FontSize="12" Foreground="{DynamicResource AccentBrush}" />
+              </Grid>
+              <controls:DragOnlySlider x:Name="sldSlow" Style="{StaticResource ThinSlider}" Margin="0,6,0,0" />
+            </StackPanel>
+            <StackPanel Margin="0,8,0,10">
+              <Grid>
+                <TextBlock Text="残影浓度" FontSize="13" />
+                <TextBlock x:Name="txtGhostAlpha" HorizontalAlignment="Right" FontSize="12" Foreground="{DynamicResource AccentBrush}" />
+              </Grid>
+              <controls:DragOnlySlider x:Name="sldGhostAlpha" Style="{StaticResource ThinSlider}" Margin="0,6,0,0" />
+            </StackPanel>
+          </StackPanel>
+        </Border>
+
+      </StackPanel>
+    </ScrollViewer>
+  </Grid>
+</Window>

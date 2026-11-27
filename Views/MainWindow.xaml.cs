@@ -2586,6 +2586,27 @@ public partial class MainWindow : Window
         }
     }
 
+    private SpectrumWindow? _spectrumWindow;
+
+    private void OnOpenSpectrumClick(object sender, RoutedEventArgs e)
+    {
+        if (_spectrumWindow is { IsVisible: true })
+        {
+            _spectrumWindow.Activate();
+            return;
+        }
+        _spectrumWindow = new SpectrumWindow(RefreshSpectrumPlacement) { Owner = this };
+        _spectrumWindow.Closed += (_, _) => _spectrumWindow = null;
+        _spectrumWindow.Show();
+    }
+
+    /// <summary>频谱设置窗改过参数之后调：重新挂一次层，再重跑一遍调色（面板透明度跟着层走）。</summary>
+    internal void RefreshSpectrumPlacement()
+    {
+        ApplySpectrumLayer();
+        ApplyAppearance();
+    }
+
     private AppearanceWindow? _appearanceWindow;
 
     private void OnOpenAppearanceClick(object sender, RoutedEventArgs e)
@@ -2662,7 +2683,7 @@ public partial class MainWindow : Window
         _nowPlayingView?.RefreshFromSettings();
         // The 下载与存储 window edits the cookie/quality too, so the API client has to follow it.
         ApplyNeteaseSettings();
-        string signature = $"{settings.ThemeImage}|{settings.ThemeAccent}|{settings.ThemeSurface}|{settings.ThemeOpacity:0.##}";
+        string signature = $"{settings.ThemeImage}|{settings.ThemeAccent}|{settings.ThemeSurface}|{settings.ThemeOpacity:0.##}|{Services.SpectrumOptions.Current.Layer}";
         if (signature != _themeSignature)
         {
             _themeSignature = signature;
@@ -2754,7 +2775,8 @@ public partial class MainWindow : Window
                          string.Equals(raw, Services.Palette.CoverToken, StringComparison.OrdinalIgnoreCase);
         string path = !coverMode && raw.Length > 0 && System.IO.File.Exists(raw) ? raw : "";
         bool photo = coverMode || path.Length > 0;
-        Services.Palette.Apply(_settings.ThemeAccent, _settings.ThemeSurface, photo);
+        Services.Palette.Apply(_settings.ThemeAccent, _settings.ThemeSurface, photo,
+            Services.SpectrumOptions.Current.IsBackdrop ? (byte)0x99 : (byte)0xFF);
         // 背景色选「透明」（8 位 AARRGGBB，alpha=00）时窗口必须是分层窗口才真的透过去看得到下层应用；
         // 这个属性只能在窗口创建前决定，所以切换要重启。若现在还不是玻璃窗口，这里先不透明，
         // 并给一句提示（见下面的 toast）。

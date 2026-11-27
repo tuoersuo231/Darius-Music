@@ -79,7 +79,7 @@ public sealed class SpectrumSettings
     /// <c>backdrop</c> = 夹在壁纸和面板之间（真正的"UI 后层"），面板不透明时会被整块挡住，
     /// 要把「界面外观 → 主题不透明度」降到 60% 左右才透得出来。
     /// </summary>
-    public string Layer { get; set; } = "overlay";
+    public string Layer { get; set; } = "backdrop";
 
     /// <summary>Layer 是否等于 backdrop。</summary>
     [JsonIgnore]

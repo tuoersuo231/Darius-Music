@@ -175,6 +175,13 @@
                       </StackPanel.Children>
                     </StackPanel>
                   </Button>
+                  <Button x:Name="btnOpenSpectrum" Click="OnOpenSpectrumClick" Style="{StaticResource GhostButton}" Background="#00FFFFFF" BorderBrush="#00FFFFFF" HorizontalContentAlignment="Left" Padding="8,6,8,6">
+                    <StackPanel Orientation="Horizontal">
+                      <StackPanel.Children>
+                        <TextBlock Text="频谱设置" FontSize="12" />
+                      </StackPanel.Children>
+                    </StackPanel>
+                  </Button>
                   <Button x:Name="btnOpenSettings" Click="OnOpenSettingsClick" Style="{StaticResource GhostButton}" Background="#00FFFFFF" BorderBrush="#00FFFFFF" HorizontalContentAlignment="Left" Padding="8,6,8,6">
                     <StackPanel Orientation="Horizontal">
                       <StackPanel.Children>

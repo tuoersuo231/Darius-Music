@@ -19,6 +19,7 @@ public sealed class SpectrumView : FrameworkElement
 {
     private static SpectrumService? _shared;
     private static int _users;
+    private static readonly List<SpectrumView> _live = new();
 
     private readonly SpectrumService _service;
     private SpectrumSettings _options = SpectrumOptions.Current;
@@ -53,8 +54,37 @@ public sealed class SpectrumView : FrameworkElement
         _service.Configure(_options);
         IsHitTestVisible = false;
         SnapsToDevicePixels = true;
+        _live.Add(this);
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
+    }
+
+    /// <summary>
+    /// 参数被设置窗口改过之后调这个：服务重新分配缓冲、所有活着的控件马上按新参数重画。
+    /// 不用重启 —— 「频谱设置」里拖滑块就是走这条路。
+    /// </summary>
+    public static void RefreshAll()
+    {
+        var options = SpectrumOptions.Current;
+        _shared?.Configure(options);
+        foreach (var view in _live.ToArray())
+        {
+            view._options = options;
+            view.ApplyOptions();
+        }
+    }
+
+    /// <summary>把高度 / 透明度和开关落到控件上（参数可以在启动之后改）。</summary>
+    private void ApplyOptions()
+    {
+        var options = SpectrumOptions.Current;
+        _options = options;
+        Visibility = options.Enabled ? Visibility.Visible : Visibility.Collapsed;
+        if (!options.Enabled) return;
+        double wanted = Math.Max(8, options.Height);
+        if (double.IsNaN(Height) || Math.Abs(Height - wanted) > 0.5) Height = wanted;
+        Opacity = Math.Clamp(options.Opacity <= 0 ? 1 : options.Opacity, 0, 1);
+        InvalidateVisual();
     }
 
     private static SpectrumService Acquire()
@@ -79,10 +109,8 @@ public sealed class SpectrumView : FrameworkElement
     {
         _service.Start();   // 幂等：布局重建会被移除又加回来，这里确保回环是活的
 
-        // 高度也交给配置，XAML 那边不写死，否则改了 settings.json 没反应。
-        double wanted = Math.Max(8, _options.Height);
-        if (double.IsNaN(Height) || Math.Abs(Height - wanted) > 0.5) Height = wanted;
-        Opacity = Math.Clamp(_options.Opacity <= 0 ? 1 : _options.Opacity, 0, 1);
+        // 高度也交给配置，XAML 那边不写死，否则改了 spectrum.json 没反应。
+        ApplyOptions();
 
         if (_running) return;
         _running = true;
@@ -124,7 +152,8 @@ public sealed class SpectrumView : FrameworkElement
         double height = ActualHeight;
         if (width <= 1 || height <= 1) return;
 
-        var options = _options;
+        var options = SpectrumOptions.Current;
+        _options = options;
         Color color = options.ResolveColor();
         if (_fill == null || color != _cachedFill)
         {
@@ -141,8 +170,10 @@ public sealed class SpectrumView : FrameworkElement
 
         var fast = _service.Read();
         var slow = _service.Read(true);
-        int count = fast.Length;
-        if (count == 0) return;
+        // 频段数可能少于柱子数：镜像模式下左右两半共用同一组频段。
+        int bands = fast.Length;
+        int count = Math.Max(1, options.Mirror ? options.Bars : bands);
+        if (bands == 0) return;
 
         double gap = Math.Max(0, options.Gap);
         double radius = Math.Max(0, options.CornerRadius);
@@ -157,8 +188,8 @@ public sealed class SpectrumView : FrameworkElement
             {
                 // i=0 和 i=count-1 是最外侧的高频，中间是低频。
                 source = (int)Math.Round(Math.Abs(i - (count - 1) / 2.0));
-                source = Math.Clamp(source, 0, count / 2);
             }
+            source = Math.Clamp(source, 0, bands - 1);
 
             double x = i * (barWidth + gap);
             double solid = height * fast[source];

@@ -6092,6 +6092,31 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
             File.AppendAllText(Path.Combine(dir, "layout.txt"),
                 Environment.NewLine + "spectrum: " + homeSpectrum.DebugState);
 
+        // QA: 频谱设置窗 —— 打开、截图，再实时改一次高度，确认主窗口的条子跟着变（不重启）。
+        if (args.Contains("--spectrum-shot"))
+        {
+            var spectrumWindow = new Views.SpectrumWindow(main.RefreshSpectrumPlacement) { Owner = main };
+            spectrumWindow.Show();
+            for (int i = 0; i < 10; i++) Pump(app, 80);
+            Save(spectrumWindow, Path.Combine(dir, "spectrum-window.png"));
+            File.AppendAllText(Path.Combine(dir, "layout.txt"),
+                Environment.NewLine + "spectrum window: " + spectrumWindow.DebugState());
+            File.AppendAllText(Path.Combine(dir, "layout.txt"),
+                Environment.NewLine + "spectrum live: " + spectrumWindow.DebugSetHeight(320));
+            for (int i = 0; i < 10; i++) Pump(app, 80);
+            Save(main, Path.Combine(dir, "spectrum-live.png"));
+            if (main.FindName("bottomSpectrum") is Controls.SpectrumView liveSpectrum)
+                File.AppendAllText(Path.Combine(dir, "layout.txt"),
+                    Environment.NewLine + "spectrum(live): " + liveSpectrum.DebugState);
+            File.AppendAllText(Path.Combine(dir, "layout.txt"),
+                Environment.NewLine + "spectrum overlay: " + spectrumWindow.DebugSetOverlay(true) +
+                " parent=" + main.DebugSpectrumLayer());
+            for (int i = 0; i < 10; i++) Pump(app, 80);
+            Save(main, Path.Combine(dir, "spectrum-overlay.png"));
+            spectrumWindow.Close();
+            for (int i = 0; i < 4; i++) Pump(app, 60);
+        }
+
         // QA: open one tooltip so its themed look can be screenshotted (the stock WPF one is white).
         if (args.Contains("--tooltip"))
         {

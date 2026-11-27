@@ -67,7 +67,7 @@ public static class Palette
     /// pinned high, so the interface stays readable no matter what is picked, and the colour is
     /// carried by the side bar and the top band instead of bleeding into every panel.
     /// </summary>
-    public static void Apply(string accentHex, string surfaceHex, bool glassy = false)
+    public static void Apply(string accentHex, string surfaceHex, bool glassy = false, byte maxPlate = 0xFF)
     {
         var resources = Application.Current?.Resources;
         if (resources == null) return;
@@ -129,6 +129,8 @@ public static class Palette
         // An explicit alpha in the 背景色 (the 透明 option: "00RRGGBB") wins and is used verbatim: 00 means
         // the window really is see-through, with no tint of our own on top.
         byte plate = surfaceAlpha < 0xFF ? surfaceAlpha : glassy ? (byte)0xDA : (byte)0xFF;
+        // 频谱藏在壁纸和面板中间时，面板必须让一点透明出来，否则柱子一根都透不出来。
+        if (maxPlate < plate) plate = maxPlate;
 
         Set(resources, "WindowBrush", Solid(window));
         Set(resources, "SidebarBrush", Solid(WithAlpha(window, plate)));
