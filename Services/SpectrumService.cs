@@ -27,6 +27,9 @@ public sealed class SpectrumService : IDisposable
     private int _bars;
     private float _fastDecay = 1f;
     private float _slowDecay = 1f;
+    private double[] _db = Array.Empty<double>();
+    private float _refDb = float.NaN;   // 慢跟随的"当前最响的那条"
+    private float _gainDb;              // 自动增益（dB）
 
     /// <summary>
     /// 一路回环。机器上经常不止一个活动的输出设备（内置声卡 + USB 音箱 + 耳机），
@@ -38,9 +41,11 @@ public sealed class SpectrumService : IDisposable
     {
         public WasapiLoopbackCapture Capture = null!;
         public WaveFormat Format = null!;
+        public MMDevice Device = null!;
         public string Name = "";
         public string Error = "";
         public double Energy;
+        public int NonZero;
     }
 
     private readonly List<Tap> _taps = new();
@@ -71,12 +76,30 @@ public sealed class SpectrumService : IDisposable
                     : string.Join(" | ", _taps.Select(t =>
                         t.Error.Length > 0
                             ? $"{t.Name}=ERR:{t.Error}"
-                            : $"{t.Name}={t.Energy:0.0000}"));
+                            : $"{t.Name}={t.Energy:0.0000}/peak={MasterPeak(t):0.0000}/nz={t.NonZero}/{Fmt(t)}"));
         }
     }
     public long BytesCaptured { get { lock (_gate) return _bytes; } }
     public long Frames { get { lock (_gate) return _frames; } }
     public float Peak { get { lock (_gate) return _peak; } }
+
+    /// <summary>诊断用：这块设备的系统级峰值表（它自己有声音时 &gt; 0）。</summary>
+    private static double MasterPeak(Tap tap)
+    {
+        try { return tap.Device?.AudioMeterInformation?.MasterPeakValue ?? 0; }
+        catch { return 0; }
+    }
+
+    /// <summary>诊断用：采样格式，比如 "float32 48000 2ch"。</summary>
+    private static string Fmt(Tap tap)
+    {
+        var f = tap.Format;
+        if (f == null) return "?";
+        string enc = f.Encoding == WaveFormatEncoding.IeeeFloat ? "float"
+            : f.Encoding == WaveFormatEncoding.Extensible ? "ext"
+            : "pcm";
+        return $"{enc}{f.BitsPerSample} {f.SampleRate} {f.Channels}ch";
+    }
 
     /// <summary>把 settings.json 里那份参数装进来。条数变了会重建缓冲。</summary>
     public void Configure(SpectrumSettings options)
@@ -90,6 +113,7 @@ public sealed class SpectrumService : IDisposable
                 _fast = new float[_bars];
                 _slow = new float[_bars];
             }
+            if (_db.Length != _bars) _db = new double[_bars];
             RebuildRanges();
             UpdateDecay();
         }
@@ -109,7 +133,7 @@ public sealed class SpectrumService : IDisposable
                     try
                     {
                         var loop = new WasapiLoopbackCapture(device);
-                        taps.Add(new Tap { Capture = loop, Format = loop.WaveFormat, Name = device.FriendlyName });
+                        taps.Add(new Tap { Capture = loop, Format = loop.WaveFormat, Device = device, Name = device.FriendlyName });
                     }
                     catch { }
                 }
@@ -173,6 +197,11 @@ public sealed class SpectrumService : IDisposable
             if (format == null || e.BytesRecorded <= 0) return;
 
             tap.Energy = tap.Energy * 0.6 + EstimateEnergy(e.Buffer, e.BytesRecorded, format) * 0.4;
+            // 缓冲区里到底有没有字（非 0 字节个数），用来区分"抓到的就是静音"和"解码解错了"。
+            int nz = 0;
+            for (int i = 0; i + 1 < e.BytesRecorded; i += 64)
+                if (e.Buffer[i] != 0 || e.Buffer[i + 1] != 0) nz++;
+            tap.NonZero = nz;
 
             // 换成当前最响的那一路。带 2 倍迟滞，免得两块都没声时来回跳。
             var best = _active;
@@ -262,6 +291,7 @@ public sealed class SpectrumService : IDisposable
         double spanDb = Math.Max(1.0, _options.SpanDb);
         double boost = Math.Max(1.0, _options.BoostPerBar);
         float peak = 0;
+        double frameMax = double.NegativeInfinity;
 
         for (int bar = 0; bar < _bars; bar++)
         {
@@ -277,7 +307,29 @@ public sealed class SpectrumService : IDisposable
             // 高频天生比低频弱 20~30 dB，按条号补回来（每条约 +1.2 dB），否则右边一半永远是 0。
             loudest *= Math.Pow(boost, bar);
             double db = 20 * Math.Log10(loudest + 1e-12);
-            float value = (float)Math.Clamp((db - floorDb) / spanDb, 0, 1);
+            _db[bar] = db;
+            if (db > frameMax) frameMax = db;
+        }
+
+        // 自动增益：音量小的时候（比如系统音量只有 30%），最响的那条可能只到 -46 dB，
+        // 按固定的 FloorDb/SpanDb 映射就永远是 0 —— 用户看到的就是"柱子很矮 / 干脆看不见"。
+        // 这里让最响的那条自动爬到 FloorDb + SpanDb*0.92，参考电平快上慢落，听起来才不抽。
+        double gain = 0;
+        if (_options.AutoGain && frameMax > -90)
+        {
+            if (float.IsNaN(_refDb)) _refDb = (float)frameMax;
+            else if (frameMax > _refDb) _refDb = (float)frameMax;
+            else _refDb -= (float)((_refDb - frameMax) * 0.004);
+            if (_refDb < -110) _refDb = -110;
+            double target = floorDb + spanDb * 0.92;
+            float want = (float)Math.Clamp(target - _refDb, -30, 40);
+            _gainDb += (want - _gainDb) * 0.01f;
+            gain = _gainDb;
+        }
+
+        for (int bar = 0; bar < _bars; bar++)
+        {
+            float value = (float)Math.Clamp((_db[bar] + gain - floorDb) / spanDb, 0, 1);
             if (value > peak) peak = value;
 
             _fast[bar] = Math.Max(value, _fast[bar] - _fastDecay);

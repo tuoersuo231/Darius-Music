@@ -41,7 +41,8 @@ public sealed class SpectrumView : FrameworkElement
             foreach (var value in fast) if (value > max) max = value;
             return $"running={_service.Running} bytes={_service.BytesCaptured} frames={_service.Frames} " +
                    $"device='{_service.ActiveDevice}' taps=[{_service.TapDiagnostics}] " +
-                   $"size={ActualWidth:0}x{ActualHeight:0} visible={IsVisible} bars={fast.Length} max={max:0.00}";
+                   $"size={ActualWidth:0}x{ActualHeight:0} visible={IsVisible} bars={fast.Length} max={max:0.00} " +
+                   $"vals=[{string.Join(",", fast.Select(v => v.ToString("0.00")))}]";
         }
     }
 

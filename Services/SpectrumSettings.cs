@@ -52,6 +52,12 @@ public sealed class SpectrumSettings
     /// <summary>归一化跨度（dB）。调大 → 条变矮、层次更细；调小 → 条更满、更激烈。</summary>
     public double SpanDb { get; set; } = 26;
 
+    /// <summary>
+    /// 自动增益：让"当前最响的那条"自动顶到 <c>FloorDb + SpanDb*0.92</c>。
+    /// 系统音量小、歌本身录得轻的时候，柱子不会缩成一条线。参考电平快上慢落，所以副歌不会爆。
+    /// </summary>
+    public bool AutoGain { get; set; } = true;
+
     /// <summary>实心条的衰减时间（ms）。小 = 跟手，大 = 粘。</summary>
     public double FastMs { get; set; } = 150;
 
@@ -128,7 +134,7 @@ public sealed class SpectrumSettings
     private SpectrumSettings Sanitized()
     {
         Bars = Math.Clamp(Bars <= 0 ? 24 : Bars, 4, 128);
-        Height = double.IsNaN(Height) || Height < 8 ? 72 : Math.Min(400, Height);
+        Height = double.IsNaN(Height) || Height < 8 ? 72 : Math.Min(2000, Height);
         Gap = double.IsNaN(Gap) || Gap < 0 ? 0 : Math.Min(40, Gap);
         CornerRadius = double.IsNaN(CornerRadius) || CornerRadius < 0 ? 0 : Math.Min(20, CornerRadius);
         Opacity = double.IsNaN(Opacity) || Opacity <= 0 ? 1 : Math.Min(1, Opacity);
