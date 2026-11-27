@@ -6027,7 +6027,8 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
             if (controller.Songs.Count == 0) RunBlocking(app, controller.ShowLibraryAsync());
             if (rowIndex >= 0 && rowIndex < controller.Songs.Count)
             {
-                controller.Playback.SetVolume(0);
+                // 和在线那条一样：默认静音截图，要验频谱必须 --audible，否则回环抓到的全是 0。
+                controller.Playback.SetVolume(args.Contains("--audible") ? 0.30f : 0f);
                 var pick = controller.Songs[rowIndex];
                 RunBlocking(app, controller.PlayAsync(pick));
                 for (int i = 0; i < 12; i++)
@@ -6037,7 +6038,8 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
                 }
                 File.WriteAllText(Path.Combine(dir, "play.txt"),
                     $"playing={pick.DisplayTitle} current={controller.Current?.DisplayTitle} " +
-                    $"isCurrent={pick.IsCurrent} state={controller.PlaybackState} pos={controller.RawPositionMs:0}");
+                    $"isCurrent={pick.IsCurrent} state={controller.PlaybackState} pos={controller.RawPositionMs:0} " +
+                    $"volume={controller.Playback.Volume:0.00}");
             }
         }
 
