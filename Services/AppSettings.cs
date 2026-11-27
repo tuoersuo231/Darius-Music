@@ -58,9 +58,6 @@ public sealed class AppSettings
     public string TextColor { get; set; } = "FFFFFF";
     public string GlowColor { get; set; } = "E0E0E0";
 
-    /// <summary>窗口最底边那条频谱（settings.json 的 Spectrum 节点）。改完重启生效。</summary>
-    public SpectrumSettings Spectrum { get; set; } = new();
-
     // Desktop-only extras
     public bool Locked { get; set; } = false;       // true = mouse click-through
     public bool Topmost { get; set; } = true;
@@ -363,15 +360,9 @@ public static class SettingsStore
         {
             settings = new AppSettings().Normalized();
         }
-        // 频谱控件在 XAML 里就建出来了，构造函数早于任何 UI 代码 —— 参数只能走这个静态入口。
-        SpectrumOptions.Current = settings.Spectrum ?? new SpectrumSettings();
-        // 老版本的 settings.json 里没有 Spectrum 节点，写一次把全部可调项落到磁盘上。
-        try
-        {
-            if (!File.Exists(FilePath) || !File.ReadAllText(FilePath).Contains("\"Spectrum\""))
-                Save(settings);
-        }
-        catch { }
+        // 频谱参数放在独立的 data\spectrum.json 里（不是本文件的节点）：那份是给人手改的，
+        // 混在几百行设置里没人找得到。第一次运行会自动写一份默认值。
+        SpectrumOptions.Current = SpectrumSettings.Load();
         return settings;
     }
 
