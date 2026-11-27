@@ -97,7 +97,13 @@ public sealed class SpectrumSettings
             if (File.Exists(FilePath))
             {
                 var loaded = JsonSerializer.Deserialize<SpectrumSettings>(File.ReadAllText(FilePath), Json);
-                if (loaded != null) return loaded.Sanitized();
+                if (loaded != null)
+                {
+                    var clean = loaded.Sanitized();
+                    // 补写一遍：老文件里没有这一版新增的字段（比如 Layer），用户打开文件看不见就没法调。
+                    try { clean.Write(); } catch { }
+                    return clean;
+                }
             }
         }
         catch { }
