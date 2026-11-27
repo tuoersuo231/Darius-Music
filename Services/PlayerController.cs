@@ -1160,7 +1160,7 @@ public sealed class PlayerController : IDisposable
             if (cached.HasWordTiming) return cached;
             // 第二源"已经问过"只代表不再联网。本地对齐不是网络源，模型可能是后来才装上的，
             // 所以这里还要试一次，否则装模型之前放过的歌永远不会被对齐。
-            if (IsFresh(secondSource, 30))
+            if (IsFresh(secondSource, 7))
             {
                 ScheduleLocalAlign(cloudId, song, cached);
                 return cached;
@@ -1194,7 +1194,6 @@ public sealed class PlayerController : IDisposable
 
         if (!LrcParser.HasWordTiming(doc))
         {
-            Touch(secondSource);
             int seconds = (int)song.Duration.TotalSeconds;
             if (_waitForWordLevel)
             {
@@ -1203,6 +1202,10 @@ public sealed class PlayerController : IDisposable
                 var inline = await FetchWordLevelAsync(cloudId, song, doc, seconds, tried).ConfigureAwait(false);
                 LogLyric(song, cloudId, inline, tried, probe.ElapsedMilliseconds);
                 if (inline != null) return inline;
+                // 只有四家全失败才写"问过了"。以前在问之前就写：换源成功但缓存没落盘（写盘失败、
+                // 被杀软挡住、两个实例抢文件）时，下次播放会因为标记新鲜直接退回均分，再也不问源 ——
+                // 一首本来有逐字的歌就此永久钉在均分上。
+                Touch(secondSource);
                 ScheduleLocalAlign(cloudId, song, doc);
             }
             else
@@ -1225,7 +1228,8 @@ public sealed class PlayerController : IDisposable
             LogLyric(song, cloudId, doc, tried, watch.ElapsedMilliseconds);
             if (doc == null)
             {
-                // 四个源都没有 → 才是 D 方案允许调度的时刻。
+                // 四个源都没有 → 才是 D 方案允许调度的时刻，也才是记"问过了"的时刻。
+                Touch(Path.Combine(AppPaths.DataDir, "lyrics", cloudId + ".qsb"));
                 ScheduleLocalAlign(cloudId, song, baseDoc);
                 return;
             }

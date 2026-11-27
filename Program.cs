@@ -135,6 +135,11 @@ public static class Program
             RunWordLevelTest(args);
             return;
         }
+        if (args.Contains("--source-audit"))
+        {
+            RunSourceAudit(args, settings);
+            return;
+        }
         if (args.Contains("--lx-import"))
         {
             // Import one or more LX scripts into this install's data folder without opening the UI.
@@ -2821,6 +2826,83 @@ public static class Program
                       $"wordLines={wordLines} words={words} ({watch.ElapsedMilliseconds}ms){head}{error}");
         }
         File.WriteAllLines(Arg(args, "--report") ?? "lrclib-test.txt", lines);
+    }
+
+    /// <summary>
+    /// QA: 只测「源本身有没有逐字」。按关键词搜网易云拿 id，再依次问 AMLL / 酷狗 / 腾讯 / LRCLIB，
+    /// <b>本地对齐模型完全不参与</b>（这条路径上根本没有 ScheduleLocalAlign）。用来回答一个一直被
+    /// 搅混的问题：在线搜到的歌，到底有多少本来就带逐字时间，多少得靠本地算。
+    /// </summary>
+    private static void RunSourceAudit(string[] args, AppSettings settings)
+    {
+        var lines = new List<string>
+        {
+            $"localAlignAvailable={Services.LocalAlign.Available} (this audit never schedules it)",
+            "keyword\tid\tdur\tneteaseLines\tyrcLines\tamll\tkugou\tqq\tlrclib\twinner",
+        };
+        Services.NeteaseApi.Cookie = settings.NeteaseCookie;
+        Services.NeteaseApi.Quality = settings.NeteaseQuality;
+
+        int total = 0, solved = 0;
+        foreach (var keyword in args.SkipWhile(a => a != "--source-audit").Skip(1)
+                     .TakeWhile(a => !a.StartsWith("--")))
+        {
+            total++;
+            Models.Song? song = null;
+            try
+            {
+                var page = Services.NeteaseApi.SearchAsync(keyword, 1).GetAwaiter().GetResult();
+                song = page.Songs.FirstOrDefault();
+            }
+            catch { }
+            if (song == null)
+            {
+                lines.Add($"{keyword}\t-\t-\t-\t-\t-\t-\t-\t-\tnot-found");
+                continue;
+            }
+
+            int seconds = (int)Math.Round(song.Duration.TotalSeconds);
+            Models.LyricDocument? baseDoc = null;
+            try
+            {
+                var text = Task.Run(() => Services.NeteaseApi.LyricAsync(song.NeteaseId))
+                    .GetAwaiter().GetResult();
+                if (!string.IsNullOrWhiteSpace(text)) baseDoc = Services.LrcParser.Parse(text);
+            }
+            catch { }
+
+            // 四个源全部真问一遍（不看是否已经命中），否则表格里的 "-" 分不清是"没有"还是"没问"。
+            var amll = TryCall(() => Services.AmllLyrics.EnsureAsync(song.NeteaseId, baseDoc,
+                TimeSpan.FromSeconds(10)));
+            var kugou = TryCall(() => Services.KugouLyric.EnsureAsync(song.NeteaseId, song.DisplayTitle,
+                song.DisplayArtist, seconds, baseDoc, TimeSpan.FromSeconds(15)));
+            var qq = TryCall(() => Services.QqLyric.EnsureAsync(song.NeteaseId, song.DisplayTitle,
+                song.DisplayArtist, baseDoc, seconds, TimeSpan.FromSeconds(20)));
+            var lrclib = TryCall(() => Services.LrclibLyric.EnsureAsync(song.NeteaseId, song.DisplayTitle,
+                song.DisplayArtist, seconds, baseDoc, TimeSpan.FromSeconds(14)));
+
+            int yrc = baseDoc?.Lines.Count(l => l.HasWordTiming) ?? 0;
+            string winner = amll != null ? "amll"
+                : kugou != null ? "kugou"
+                : qq != null ? "qq"
+                : lrclib != null ? "lrclib"
+                : yrc > 0 ? "netease-yrc"
+                : "NONE";
+            if (winner != "NONE") solved++;
+            lines.Add($"{keyword}\t{song.NeteaseId}\t{seconds}s\t{baseDoc?.Lines.Count ?? 0}\t{yrc}" +
+                      $"\t{Tally(amll)}\t{Tally(kugou)}\t{Tally(qq)}\t{Tally(lrclib)}\t{winner}");
+        }
+        lines.Add($"solved={solved}/{total}");
+        File.WriteAllLines(Arg(args, "--report") ?? "source-audit.txt", lines);
+        return;
+
+        static string Tally(Models.LyricDocument? doc)
+        {
+            if (doc == null) return "-";
+            int timed = doc.Lines.Count(l => l.HasWordTiming);
+            int words = doc.Lines.Sum(l => l.Words.Count);
+            return timed > 0 ? $"+{timed}/{words}" : "?";
+        }
     }
 
     /// <summary>QA: walks the whole word-level ladder (AMLL → 酷狗 → 腾讯 → LRCLIB) for one NetEase id,
