@@ -125,6 +125,16 @@ public static class Program
             RunLxTest(args);
             return;
         }
+        if (args.Contains("--lrclib-test"))
+        {
+            RunLrclibTest(args);
+            return;
+        }
+        if (args.Contains("--wordlevel-test"))
+        {
+            RunWordLevelTest(args);
+            return;
+        }
         if (args.Contains("--lx-import"))
         {
             // Import one or more LX scripts into this install's data folder without opening the UI.
@@ -2740,13 +2750,14 @@ public static class Program
             lines.Add("capabilities=" + capabilities);
 
             long id = long.TryParse(Arg(args, "--id"), out var parsed) ? parsed : 524149974L;
+            var platform = Arg(args, "--source") ?? "wy";
             var info = new System.Text.Json.Nodes.JsonObject
             {
                 ["type"] = "320k",
                 ["musicInfo"] = new System.Text.Json.Nodes.JsonObject
                 {
-                    ["source"] = "wy",
-                    ["songmid"] = id.ToString(),
+                    ["source"] = platform,
+                    ["songmid"] = platform == "wy" ? id.ToString() : "",
                     ["name"] = Arg(args, "--name") ?? "打ち上げ花火",
                     ["singer"] = Arg(args, "--singer") ?? "Daoko / 米津玄師",
                     ["albumName"] = "",
@@ -2754,14 +2765,134 @@ public static class Program
                 },
             };
             var declared = new List<string> { "128k", "320k", "flac" };
-            var audio = runtime.Resolve("wy", "exhigh", info, declared);
-            lines.Add($"resolved quality={audio.Quality} source={audio.Source} url={audio.Url}");
+            var audio = runtime.Resolve(platform, "exhigh", info, declared);
+            lines.Add($"resolved platform={platform} quality={audio.Quality} url={audio.Url}");
         }
         catch (Exception e)
         {
             lines.Add("failed: " + e.GetType().Name + ": " + e.Message);
         }
         File.WriteAllLines(Arg(args, "--report") ?? "lx-test.txt", lines);
+    }
+
+    /// <summary>QA: runs the LRCLIB word-sync source over a list of <c>title::artist::seconds</c>
+    /// targets, reporting hit rate, line/word counts and how long each lookup took. No UI.</summary>
+    private static void RunLrclibTest(string[] args)
+    {
+        var lines = new List<string>();
+        var targets = new List<(string Title, string Artist, int Seconds)>();
+        foreach (var item in args.SkipWhile(a => a != "--lrclib-test").Skip(1)
+                     .TakeWhile(a => !a.StartsWith("--")))
+        {
+            var parts = item.Split("::");
+            if (parts.Length == 0 || parts[0].Length == 0) continue;
+            int seconds = parts.Length > 2 && int.TryParse(parts[2], out var parsed) ? parsed : 0;
+            targets.Add((parts[0], parts.Length > 1 ? parts[1] : "", seconds));
+        }
+        lines.Add($"targets={targets.Count}");
+        foreach (var target in targets)
+        {
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            Models.LyricDocument? doc = null;
+            string error = "";
+            try
+            {
+                doc = Task.Run(() => Services.LrclibLyric.Fetch(0, target.Title, target.Artist,
+                    target.Seconds, null)).GetAwaiter().GetResult();
+            }
+            catch (Exception e)
+            {
+                error = " " + e.GetType().Name + ": " + e.Message;
+            }
+            watch.Stop();
+            if (doc == null)
+            {
+                lines.Add($"{target.Title} :: {target.Artist} -> none ({watch.ElapsedMilliseconds}ms){error}");
+                continue;
+            }
+            int wordLines = doc.Lines.Count(l => l.HasWordTiming);
+            int words = doc.Lines.Sum(l => l.Words.Count);
+            var first = doc.Lines.FirstOrDefault(l => l.HasWordTiming);
+            var head = first == null
+                ? ""
+                : $" first='{first.Text}' words={first.Words.Count} " +
+                  $"w0={first.Words[0].StartMs}..{first.Words[0].EndMs}";
+            lines.Add($"{target.Title} :: {target.Artist} -> lines={doc.Lines.Count} " +
+                      $"wordLines={wordLines} words={words} ({watch.ElapsedMilliseconds}ms){head}{error}");
+        }
+        File.WriteAllLines(Arg(args, "--report") ?? "lrclib-test.txt", lines);
+    }
+
+    /// <summary>QA: walks the whole word-level ladder (AMLL → 酷狗 → 腾讯 → LRCLIB) for one NetEase id,
+    /// stopping at the first hit and reporting what every step produced, so the effect of adding a
+    /// source is a number instead of an opinion. Target format: <c>id::title::artist::seconds</c>.</summary>
+    private static void RunWordLevelTest(string[] args)
+    {
+        var lines = new List<string>();
+        foreach (var item in args.SkipWhile(a => a != "--wordlevel-test").Skip(1)
+                     .TakeWhile(a => !a.StartsWith("--")))
+        {
+            var parts = item.Split("::");
+            if (parts.Length < 3 || !long.TryParse(parts[0], out var id)) continue;
+            var title = parts[1];
+            var artist = parts[2];
+            int seconds = parts.Length > 3 && int.TryParse(parts[3], out var sec) ? sec : 0;
+            lines.Add($"--- id={id} '{title}' - '{artist}' {seconds}s");
+
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            Models.LyricDocument? baseDoc = null;
+            try
+            {
+                var text = Task.Run(() => Services.NeteaseApi.LyricAsync(id)).GetAwaiter().GetResult();
+                if (!string.IsNullOrWhiteSpace(text)) baseDoc = Services.LrcParser.Parse(text);
+            }
+            catch { }
+            lines.Add($"  {"netease",-8} lines={baseDoc?.Lines.Count ?? 0} " +
+                      $"wordLines={baseDoc?.Lines.Count(l => l.HasWordTiming) ?? 0} ({watch.ElapsedMilliseconds}ms)");
+
+            long mark = watch.ElapsedMilliseconds;
+            var doc = TryCall(() => Services.AmllLyrics.EnsureAsync(id, baseDoc, TimeSpan.FromSeconds(10)));
+            Report("amll", doc, watch.ElapsedMilliseconds - mark);
+            if (doc != null) continue;
+
+            mark = watch.ElapsedMilliseconds;
+            doc = TryCall(() => Services.KugouLyric.EnsureAsync(id, title, artist, seconds, baseDoc,
+                TimeSpan.FromSeconds(15)));
+            Report("kugou", doc, watch.ElapsedMilliseconds - mark);
+            if (doc != null) continue;
+
+            mark = watch.ElapsedMilliseconds;
+            doc = TryCall(() => Services.QqLyric.EnsureAsync(id, title, artist, baseDoc, seconds,
+                TimeSpan.FromSeconds(20)));
+            Report("qq", doc, watch.ElapsedMilliseconds - mark);
+            if (doc != null) continue;
+
+            mark = watch.ElapsedMilliseconds;
+            doc = TryCall(() => Services.LrclibLyric.EnsureAsync(id, title, artist, seconds, baseDoc,
+                TimeSpan.FromSeconds(14)));
+            Report("lrclib", doc, watch.ElapsedMilliseconds - mark);
+        }
+        File.WriteAllLines(Arg(args, "--report") ?? "wordlevel-test.txt", lines);
+        return;
+
+        void Report(string name, Models.LyricDocument? document, long elapsed)
+        {
+            if (document == null)
+            {
+                lines.Add($"  {name,-8} - ({elapsed}ms)");
+                return;
+            }
+            int wordLines = document.Lines.Count(l => l.HasWordTiming);
+            int words = document.Lines.Sum(l => l.Words.Count);
+            lines.Add($"  {name,-8} + lines={document.Lines.Count} wordLines={wordLines} " +
+                      $"words={words} ({elapsed}ms)");
+        }
+    }
+
+    private static Models.LyricDocument? TryCall(Func<Task<Models.LyricDocument?>> call)
+    {
+        try { return Task.Run(call).GetAwaiter().GetResult(); }
+        catch { return null; }
     }
 
     private static void RunNeteaseTest(string[] args, AppSettings settings)

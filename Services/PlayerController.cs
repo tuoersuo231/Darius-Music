@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.IO;
+using System.Net.Http;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
@@ -894,7 +895,6 @@ public sealed class PlayerController : IDisposable
             {
                 var url = await Task.Run(() => ResolveWithScript(entry, song), token);
                 if (string.IsNullOrWhiteSpace(url)) continue;
-                LastLxSource = entry.Name;
                 return url;
             }
             catch (Exception e)
@@ -905,6 +905,14 @@ public sealed class PlayerController : IDisposable
         return null;
     }
 
+    /// <summary>
+    /// One script can usually serve several platforms (wy / tx / kg / kw / mg). The old code only ever
+    /// asked for <c>wy</c>, so a script whose NetEase path was down looked like a dead script even
+    /// though its QQ/Kugou paths worked. Now the platforms are tried in turn, and every URL the script
+    /// hands back is probed first — a script happily invents an address for a track it cannot serve,
+    /// and the player then fails silently. Only NetEase ids are known here, so every other platform is
+    /// asked by name/artist (an empty <c>songmid</c>) instead of having another platform's id forced on it.
+    /// </summary>
     private string? ResolveWithScript(LxEntry entry, Song song)
     {
         var file = Path.Combine(AppPaths.DataDir, "lx", entry.File);
@@ -913,27 +921,96 @@ public sealed class PlayerController : IDisposable
         runtime.Load(entry.Id, File.ReadAllText(file));
 
         var seconds = (int)Math.Round(song.Duration.TotalSeconds);
-        var info = new System.Text.Json.Nodes.JsonObject
+        Exception? last = null;
+        foreach (var platform in PlatformOrder(entry))
         {
-            ["source"] = "wy",
-            ["action"] = "musicUrl",
-            ["info"] = new System.Text.Json.Nodes.JsonObject
+            var media = new System.Text.Json.Nodes.JsonObject
             {
                 ["type"] = "320k",
                 ["musicInfo"] = new System.Text.Json.Nodes.JsonObject
                 {
-                    ["source"] = "wy",
-                    ["songmid"] = song.NeteaseId.ToString(),
+                    ["source"] = platform,
+                    ["songmid"] = platform == "wy" ? song.NeteaseId.ToString() : "",
                     ["name"] = song.DisplayTitle,
                     ["singer"] = song.DisplayArtist,
                     ["albumName"] = song.Album,
                     ["interval"] = $"{seconds / 60:00}:{seconds % 60:00}",
                 },
-            },
+            };
+            try
+            {
+                var audio = runtime.Resolve(platform, Settings.NeteaseQuality, media,
+                    entry.QualitiesFor(platform));
+                if (string.IsNullOrWhiteSpace(audio.Url)) continue;
+                if (!LooksPlayable(audio.Url))
+                {
+                    last = new LxException(platform + " 返回的地址打不开");
+                    continue;
+                }
+                LastLxSource = entry.Name + " · " + platform.ToUpperInvariant() + " " + audio.Quality;
+                return audio.Url;
+            }
+            catch (Exception e)
+            {
+                last = e;
+            }
+        }
+        if (last != null) throw last;
+        return null;
+    }
+
+    /// <summary>NetEase first (its id is the only one we have), then the platforms that search by name.</summary>
+    private static IEnumerable<string> PlatformOrder(LxEntry entry)
+    {
+        var order = new[] { "wy", "tx", "kg", "kw", "mg" };
+        var present = order.Where(p => entry.Platforms.ContainsKey(p)).ToList();
+        foreach (var key in entry.Platforms.Keys)
+            if (!present.Contains(key)) present.Add(key);
+        return present;
+    }
+
+    private static readonly HttpClient ProbeHttp = CreateProbeHttp();
+
+    private static HttpClient CreateProbeHttp()
+    {
+        var client = new HttpClient(new HttpClientHandler
+        {
+            AutomaticDecompression = System.Net.DecompressionMethods.All,
+        })
+        {
+            Timeout = TimeSpan.FromSeconds(6),
         };
-        var media = runtime.Resolve("wy", Settings.NeteaseQuality,
-            (System.Text.Json.Nodes.JsonObject)info["info"]!, entry.QualitiesFor("wy"));
-        return media.Url;
+        client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36");
+        return client;
+    }
+
+    /// <summary>
+    /// Asks for the first two bytes. A refusal (404/403) proves the address is dead and lets the next
+    /// platform be tried; a transport failure is treated as "unknown" and allowed through, because some
+    /// hosts reject Range requests yet stream fine to the player.
+    /// </summary>
+    private static bool LooksPlayable(string url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return false;
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return false;
+        if (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps) return false;
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+            request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(0, 1);
+            using var response = ProbeHttp.Send(request, HttpCompletionOption.ResponseHeadersRead);
+            if (!response.IsSuccessStatusCode) return false;
+            var type = response.Content.Headers.ContentType?.MediaType ?? "";
+            if (type.StartsWith("audio/", StringComparison.OrdinalIgnoreCase)) return true;
+            if (type.StartsWith("video/", StringComparison.OrdinalIgnoreCase)) return true;
+            if (type.Contains("octet-stream", StringComparison.OrdinalIgnoreCase)) return true;
+            return (response.Content.Headers.ContentLength ?? 0) > 1024;
+        }
+        catch
+        {
+            return true;
+        }
     }
 
     private async Task LoadLyricsAsync(Song song)
@@ -1045,7 +1122,7 @@ public sealed class PlayerController : IDisposable
     /// downloaded before that change stop sweeping at a constant rate.
     ///
     /// 网易云只有一部分歌带 <c>yrc</c>（词级），其余以前只能整句均分。现在当它没给词级时间时，
-    /// 用第二源（腾讯 QRC）补一份真正的逐字时间；拿到就写 <c>&lt;id&gt;.qrc</c>，下次播放直接读盘。
+    /// 依次问 AMLL / 酷狗 / 腾讯 / LRCLIB 四家要一份真正的逐字时间；拿到就写进缓存，下次播放直接读盘。
     /// </summary>
     private async Task<LyricDocument?> LoadOnlineLyricsAsync(Song song, long cloudId)
     {
@@ -1059,6 +1136,7 @@ public sealed class PlayerController : IDisposable
         var wordLevel = AmllLyrics.TryCached(cloudId, cached)
                         ?? KugouLyric.TryCached(cloudId, cached)
                         ?? QqLyric.TryCached(cloudId, cached)
+                        ?? LrclibLyric.TryCached(cloudId, cached)
                         ?? LocalAlign.TryCached(cloudId, cached);
         if (wordLevel != null) return wordLevel;
         if (cached is { Lines.Count: > 0 })
@@ -1080,6 +1158,12 @@ public sealed class PlayerController : IDisposable
         {
             // Keep whatever cache we already had instead of losing the lyrics to a network hiccup.
             if (cached is { Lines.Count: > 0 }) return cached;
+            // 网易云连文字都没有时，LRCLIB 的行级至少能给一份能滚动的歌词。
+            var plain = await LrclibLyric
+                .EnsurePlainAsync(cloudId, song.DisplayTitle, song.DisplayArtist,
+                    (int)song.Duration.TotalSeconds)
+                .ConfigureAwait(false);
+            if (plain != null) return plain;
             return null;
         }
 
@@ -1125,7 +1209,7 @@ public sealed class PlayerController : IDisposable
             LogLyric(song, cloudId, doc, tried, watch.ElapsedMilliseconds);
             if (doc == null)
             {
-                // 三个源都没有 → 才是 D 方案允许调度的时刻。
+                // 四个源都没有 → 才是 D 方案允许调度的时刻。
                 ScheduleLocalAlign(cloudId, song, baseDoc);
                 return;
             }
@@ -1158,8 +1242,8 @@ public sealed class PlayerController : IDisposable
 
     /// <summary>
     /// 逐字来源依次尝试：AMLL（按 id 取，带译文/罗马音）→ 酷狗 KRC（按 hash 对，最不容易串版本）→
-    /// 腾讯 QRC（按歌名搜）。一个来源没有、或者拿到的候选过不了闸，就继续下一个；全都不行返回 null，
-    /// 界面上仍是网易云那份文字 + 收短后的均分动画。
+    /// 腾讯 QRC（按歌名搜）→ LRCLIB（海外曲库，词级时间）。一个来源没有、或者拿到的候选过不了闸，
+    /// 就继续下一个；全都不行返回 null，界面上仍是网易云那份文字 + 收短后的均分动画。
     /// </summary>
     private async Task<LyricDocument?> FetchWordLevelAsync(long cloudId, Song song, LyricDocument baseDoc,
         int seconds, List<string>? tried = null)
@@ -1195,6 +1279,19 @@ public sealed class PlayerController : IDisposable
             }
             catch { }
             tried.Add(doc != null ? "qq+" : "qq-");
+        }
+
+        if (doc == null)
+        {
+            try
+            {
+                doc = await LrclibLyric
+                    .EnsureAsync(cloudId, song.DisplayTitle, song.DisplayArtist, seconds, baseDoc,
+                        TimeSpan.FromSeconds(14))
+                    .ConfigureAwait(false);
+            }
+            catch { }
+            tried.Add(doc != null ? "lrclib+" : "lrclib-");
         }
         return doc;
     }
@@ -1240,7 +1337,8 @@ public sealed class PlayerController : IDisposable
         catch { }
     }
 
-    private const string MarkerVersion = "v2";
+    // v3: LRCLIB 成为第四个逐字源，旧标记（v2）全部作废，让已经播过的歌重新问一次四源。
+    private const string MarkerVersion = "v3";
 
     private static bool IsFresh(string path, double days)
     {
