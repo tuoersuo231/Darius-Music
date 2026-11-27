@@ -2,6 +2,7 @@ using System.IO;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Windows.Media;
 
 namespace CurrentLyrics.Services;
@@ -75,6 +76,7 @@ public sealed class SpectrumSettings
     public string Layer { get; set; } = "overlay";
 
     /// <summary>Layer 是否等于 backdrop。</summary>
+    [JsonIgnore]
     public bool IsBackdrop =>
         string.Equals((Layer ?? "").Trim(), "backdrop", StringComparison.OrdinalIgnoreCase);
 
