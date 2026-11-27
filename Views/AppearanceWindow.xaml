@@ -98,6 +98,8 @@
                     <StackPanel>
                         <TextBlock Text="常用背景色" Style="{StaticResource H2}" FontSize="13" Margin="0,0,0,10" />
                         <WrapPanel x:Name="surfacePresets" />
+                        <TextBlock x:Name="txtSurfaceHint" FontSize="11" Margin="0,2,0,0" TextWrapping="Wrap"
+                                   Foreground="{DynamicResource TextDimBrush}" />
                     </StackPanel>
                 </Border>
             </StackPanel>

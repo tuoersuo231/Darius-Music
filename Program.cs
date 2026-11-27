@@ -479,6 +479,11 @@ public static class Program
             RunKeyQa(app, args, settings);
             return;
         }
+        if (args.Contains("--chrome-qa"))
+        {
+            RunChromeQa(app, args, settings);
+            return;
+        }
         if (args.Contains("--swatch-qa"))
         {
             RunSwatchQa(app, args, settings);
@@ -3327,6 +3332,56 @@ public static class Program
         lines.Add("         ui:   " + win.DebugProgress);
         File.WriteAllLines(Path.Combine(dir, "resume-window.txt"), lines);
         win.Close();
+        app.Shutdown();
+    }
+
+    /// <summary>
+    /// QA: 在玻璃窗口里切到实色 / 再切回透明，判断「要不要重开窗口」有没有判对（真的重启由
+    /// RestartIfChromeChanged 做，这里用 DebugNoRestart 挡住，避免 QA 把进程链条拉起来）。
+    /// </summary>
+    private static void RunChromeQa(Application app, string[] args, AppSettings settings)
+    {
+        string dir = Arg(args, "--chrome-qa") ?? "chromeqa";
+        Directory.CreateDirectory(dir);
+        var lines = new List<string>();
+        // --opaque：用实色起窗口（普通带边框窗口），验证「点透明要不要重开」；默认用透明起（玻璃窗口）。
+        bool opaque = args.Contains("--opaque");
+        settings.ThemeSurface = opaque ? "101725" : "00101725";
+        var ctl = new PlayerController(settings);
+        var main = new MainWindow(ctl)
+        {
+            WindowStartupLocation = WindowStartupLocation.Manual,
+            Left = 80,
+            Top = 80,
+            Width = 1180,
+            Height = 760,
+        };
+        main.Show();
+        main.Activate();
+        for (int i = 0; i < 8; i++) PumpFrames(100);
+        lines.Add($"main window glass={main.DebugGlassMode} surface={settings.ThemeSurface}");
+
+        AppearanceWindow.DebugNoRestart = true;
+        var look = new AppearanceWindow(settings, _ => { }) { Owner = main };
+        look.Show();
+        for (int i = 0; i < 6; i++) PumpFrames(80);
+        lines.Add("before        " + look.DebugChromePlan);
+
+        look.DebugClickTransparent();              // 点透明：实色窗口应付不了 → 需要重开
+        for (int i = 0; i < 4; i++) PumpFrames(80);
+        lines.Add("after 透明    " + look.DebugChromePlan);
+
+        look.DebugCommitSurface("AABBCC");         // 换实色：玻璃窗口当场能画 → 不重开
+        for (int i = 0; i < 4; i++) PumpFrames(80);
+        lines.Add("after solid   " + look.DebugChromePlan);
+
+        var reread = SettingsStore.Load();
+        lines.Add($"persisted surface={reread.ThemeSurface} recent=[{string.Join(",", reread.RecentSurfaceColors ?? new List<string>())}]");
+        AppearanceWindow.DebugNoRestart = false;
+
+        File.WriteAllLines(Path.Combine(dir, "chrome.txt"), lines);
+        look.Close();
+        main.ForceExit();
         app.Shutdown();
     }
 

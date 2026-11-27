@@ -135,6 +135,62 @@ public partial class AppearanceWindow : Window
         Apply(s => s.ThemeSurface = hex);
         RememberSurface(hex);
         RefreshFields();
+        RestartIfChromeChanged();
+    }
+
+    /// <summary>当前设置是不是「透明背景」（存成 8 位、alpha=00）。</summary>
+    private bool WantsTransparent =>
+        Services.Palette.SurfaceAlpha(
+            Services.Palette.Normalize(_settings.ThemeSurface, Services.Palette.DefaultSurface)) < 0xFF;
+
+    /// <summary>当前这个窗口是不是分层（玻璃）窗口。</summary>
+    private bool WindowIsGlass => (Owner as MainWindow)?.DebugGlassMode ?? false;
+
+    /// <summary>QA 用：只记录、不真的重启。</summary>
+    internal static bool DebugNoRestart;
+
+    private bool _restarting;
+
+    /// <summary>
+    /// 透明背景要求窗口是分层窗口（AllowsTransparency + 无边框），而这两个属性只能在窗口创建前决定。
+    /// 所以只有「要透明、但当前不是玻璃窗口」这一个方向需要重开：存好设置、把单实例让出来、重新拉起
+    /// 自己。反方向（玻璃窗口换成实色）当场就能画，不必打扰用户。
+    /// </summary>
+    private void RestartIfChromeChanged()
+    {
+        if (!WantsTransparent || WindowIsGlass) return;
+        if (_restarting) return;
+        if (DebugNoRestart) return;
+        _restarting = true;
+        txtSurfaceHint.Text = "正在重启以应用透明背景…";
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            bool started = false;
+            try
+            {
+                // 先把单实例让出来，否则新进程会把自己当成第二个副本、只去激活旧窗口。
+                Services.SingleInstance.Release();
+                var launcher = Services.Layout.LauncherPath;
+                var start = System.IO.File.Exists(launcher) ? launcher : Environment.ProcessPath;
+                if (!string.IsNullOrEmpty(start))
+                    started = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(start)
+                    {
+                        UseShellExecute = true,
+                        WorkingDirectory = Services.Layout.Root,
+                    }) != null;
+            }
+            catch { }
+            if (!started)
+            {
+                // 起不来就别把自己关掉，否则用户面对的是「点了透明，程序没了」。
+                txtSurfaceHint.Text = "自动重启失败：请手动关闭后再打开程序。";
+                _restarting = false;
+                Services.SingleInstance.TryAcquire();
+                return;
+            }
+            if (Owner is MainWindow main) main.ForceExit();
+            else Application.Current.Shutdown();
+        }), System.Windows.Threading.DispatcherPriority.Background);
     }
 
     /// <summary>The 透明 chip: keeps the current colour (it still drives the ink and the accent) but
@@ -183,6 +239,7 @@ public partial class AppearanceWindow : Window
             if (rgb.Length == 8) rgb = rgb.Substring(2);
             Apply(s => s.ThemeSurface = "00" + rgb);
             RefreshFields();
+            RestartIfChromeChanged();
         };
         return button;
     }
@@ -399,6 +456,21 @@ public partial class AppearanceWindow : Window
     // ---- QA (--swatch-qa) ---------------------------------------------------------------
     /// <summary>Same path as closing the colour picker with 确定.</summary>
     internal void DebugCommitSurface(string hex) => CommitSurfaceColor(hex);
+
+    /// <summary>Same path as clicking the 透明 chip.</summary>
+    internal void DebugClickTransparent()
+    {
+        var rgb = Services.Palette.Normalize(_settings.ThemeSurface, Services.Palette.DefaultSurface);
+        if (rgb.Length == 8) rgb = rgb.Substring(2);
+        Apply(s => s.ThemeSurface = "00" + rgb);
+        RefreshFields();
+        RestartIfChromeChanged();
+    }
+
+    /// <summary>QA: 这次切换要不要重开窗口（只有「要透明但不是玻璃窗口」才需要）。</summary>
+    internal string DebugChromePlan =>
+        $"wants={WantsTransparent} glass={WindowIsGlass} restart={WantsTransparent && !WindowIsGlass} " +
+        $"surface={_settings.ThemeSurface} hint='{txtSurfaceHint.Text}'";
 
     /// <summary>这一排现在长什么样：chip 数量（含透明）、颜色顺序、设置里记的常用色。</summary>
     internal string DebugPresets
