@@ -465,6 +465,11 @@ public static class Program
             app.Shutdown();
             return;
         }
+        if (args.Contains("--f11-qa"))
+        {
+            RunF11Qa(app, args, settings);
+            return;
+        }
         if (args.Contains("--key-qa"))
         {
             RunKeyQa(app, args, settings);
@@ -3222,6 +3227,44 @@ public static class Program
     /// the OS (keybd_event) instead of posting messages, and prints what each one did. This is the only
     /// way to tell "registered but the OS never delivers it" apart from "delivered but the action is a
     /// no-op".</summary>
+    /// <summary>QA: F11 用真实按键能不能来回切换最大化 / 还原（透明背景的玻璃窗口也要能）。</summary>
+    private static void RunF11Qa(Application app, string[] args, AppSettings settings)
+    {
+        string dir = Arg(args, "--f11-qa") ?? "f11qa";
+        Directory.CreateDirectory(dir);
+        var lines = new List<string>();
+        settings.ThemeSurface = "#00101725";     // 透明背景 → 无边框玻璃窗口，就是卡住的那种
+        var ctl = new PlayerController(settings);
+        var win = new MainWindow(ctl)
+        {
+            WindowStartupLocation = WindowStartupLocation.Manual,
+            Left = 120,
+            Top = 90,
+            Width = 1180,
+            Height = 760,
+        };
+        win.Show();
+        win.Activate();
+        PumpFrames(800);
+        lines.Add($"start    state={win.WindowState} size={win.ActualWidth:0}x{win.ActualHeight:0} " +
+                  $"glass={win.DebugGlassMode}");
+
+        for (int i = 1; i <= 2; i++)
+        {
+            win.Activate();
+            PumpFrames(220);
+            NativeMethods.keybd_event(0x7A, 0, 0, UIntPtr.Zero);            // F11
+            PumpFrames(90);
+            NativeMethods.keybd_event(0x7A, 0, NativeMethods.KEYEVENTF_KEYUP, UIntPtr.Zero);
+            PumpFrames(650);
+            lines.Add($"after F11 #{i}: state={win.WindowState} size={win.ActualWidth:0}x{win.ActualHeight:0}");
+        }
+
+        File.WriteAllLines(Path.Combine(dir, "f11qa.txt"), lines);
+        win.Close();
+        app.Shutdown();
+    }
+
     private static void RunKeyQa(Application app, string[] args, AppSettings settings)
     {
         string dir = Arg(args, "--key-qa") ?? "keyqa";

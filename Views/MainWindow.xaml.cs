@@ -280,8 +280,17 @@ public partial class MainWindow : Window
 
     private void OnWindowPreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
+        var key = HotkeyText.NormalizeKey(e);
         // Diagnostics only: every legal chord is global now, so nothing here can consume a key.
-        _hotkeys.NoteLocalKey(HotkeyText.NormalizeKey(e), System.Windows.Input.Keyboard.Modifiers);
+        _hotkeys.NoteLocalKey(key, System.Windows.Input.Keyboard.Modifiers);
+        // F11：最大化 / 还原。透明背景的玻璃窗口没有系统标题栏（也就没有还原按钮），拖最大化窗口
+        // 也不起作用，所以给一个键盘出口。只在窗口自己在前台时管，不抢别的程序的 F11。
+        if (key == System.Windows.Input.Key.F11 &&
+            System.Windows.Input.Keyboard.Modifiers == System.Windows.Input.ModifierKeys.None)
+        {
+            WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+            e.Handled = true;
+        }
     }
 
     /// <summary>Pushes the five bindings from settings into the registrar. Returns the actions whose
