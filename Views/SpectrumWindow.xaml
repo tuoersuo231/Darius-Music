@@ -137,7 +137,7 @@
             </StackPanel>
             <StackPanel Margin="0,8">
               <Grid>
-                <TextBlock Text="逐条增益（补高频）" FontSize="13" />
+                <TextBlock Text="高频补偿（整条抬多少 dB）" FontSize="13" />
                 <TextBlock x:Name="txtBoost" HorizontalAlignment="Right" FontSize="12" Foreground="{DynamicResource AccentBrush}" />
               </Grid>
               <controls:DragOnlySlider x:Name="sldBoost" Style="{StaticResource ThinSlider}" Margin="0,6,0,0" />

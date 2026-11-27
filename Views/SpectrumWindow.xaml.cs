@@ -37,7 +37,8 @@ public partial class SpectrumWindow : Window
         Hook(sldOpacity, 0.05, 1, () => _settings.Opacity, v => _settings.Opacity = v, txtOpacity, "", "0.00");
         Hook(sldFreqMin, 20, 2000, () => _settings.FreqMin, v => _settings.FreqMin = v, txtFreqMin, " Hz");
         Hook(sldFreqMax, 1000, 16000, () => _settings.FreqMax, v => _settings.FreqMax = v, txtFreqMax, " Hz");
-        Hook(sldBoost, 1.0, 1.6, () => _settings.BoostPerBar, v => _settings.BoostPerBar = v, txtBoost, "×", "0.00");
+        Hook(sldBoost, 1.0, 1.6, () => _settings.BoostPerBar, v => _settings.BoostPerBar = v, txtBoost, "×", "0.00",
+            v => $"{v:0.00}× ≈ +{Math.Clamp((v - 1) * 40, 0, 24):0.0} dB");
         Hook(sldFloor, -90, 0, () => _settings.FloorDb, v => _settings.FloorDb = v, txtFloor, " dB");
         Hook(sldSpan, 4, 60, () => _settings.SpanDb, v => _settings.SpanDb = v, txtSpan, " dB");
         Hook(sldFast, 20, 800, () => _settings.FastMs, v => _settings.FastMs = v, txtFast, " ms");
@@ -61,18 +62,18 @@ public partial class SpectrumWindow : Window
 
     /// <summary>滑块 → 字段。范围、初值、读数文字一起带上。</summary>
     private void Hook(DragOnlySlider slider, double min, double max, Func<double> read, Action<double> write,
-        TextBlock label, string unit = "", string format = "0")
+        TextBlock label, string unit = "", string format = "0", Func<double, string>? text = null)
     {
         slider.Minimum = min;
         slider.Maximum = max;
         slider.Value = Math.Clamp(read(), min, max);
         slider.IsMoveToPointEnabled = true;
-        label.Text = read().ToString(format) + unit;
+        label.Text = text?.Invoke(read()) ?? read().ToString(format) + unit;
         slider.ValueChanged += (_, e) =>
         {
             if (_loading) return;
             write(e.NewValue);
-            label.Text = read().ToString(format) + unit;
+            label.Text = text?.Invoke(read()) ?? read().ToString(format) + unit;
             Apply(placement: false);
         };
     }

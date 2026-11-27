@@ -26,6 +26,7 @@ public sealed class SpectrumService : IDisposable
     private (int Start, int End)[] _ranges = Array.Empty<(int, int)>();
     private int _bars;
     private int _bands;
+    private double[] _boostCurve = Array.Empty<double>();
     private float _fastDecay = 1f;
     private float _slowDecay = 1f;
     private double[] _db = Array.Empty<double>();
@@ -118,9 +119,32 @@ public sealed class SpectrumService : IDisposable
                 _slow = new float[_bands];
             }
             if (_db.Length != _bands) _db = new double[_bands];
+            RebuildBoost();
             RebuildRanges();
             UpdateDecay();
         }
+    }
+
+    /// <summary>
+    /// 逐条增益原来是 pow(BoostPerBar, i)，条数一多就爆：78 根柱子 = 39 个频段，
+    /// 1.316^38 ≈ +90 dB，低频那半个频谱被压成 0，画出来就是"中间一片死水、只有边上会动"。
+    /// 现在先按滑块算"整条总共抬多少 dB"，再平均摊到每个频段上，跟条数无关。
+    /// BoostPerBar 仍记 1.0~1.6：1.14 ≈ 整条 +5.6 dB，到 1.6 封顶 +24 dB。
+    /// </summary>
+    private void RebuildBoost()
+    {
+        int bands = Math.Max(1, _bands);
+        double boost = Math.Clamp(_options.BoostPerBar, 1.0, 1.6);
+        double totalDb = Math.Clamp((boost - 1.0) * 40.0, 0, 24);
+        var curve = new double[bands];
+        double perBand = bands > 1 ? Math.Pow(10, totalDb / 20.0 / (bands - 1)) : 1.0;
+        double value = 1.0;
+        for (int i = 0; i < bands; i++)
+        {
+            curve[i] = value;
+            value *= perBand;
+        }
+        _boostCurve = curve;
     }
 
     public void Start()
@@ -293,7 +317,6 @@ public sealed class SpectrumService : IDisposable
 
         double floorDb = _options.FloorDb;
         double spanDb = Math.Max(1.0, _options.SpanDb);
-        double boost = Math.Max(1.0, _options.BoostPerBar);
         float peak = 0;
         double frameMax = double.NegativeInfinity;
 
@@ -314,7 +337,7 @@ public sealed class SpectrumService : IDisposable
             }
             double loudest = bins > 0 ? Math.Sqrt(sumPower / bins) : 0;
             // 高频天生比低频弱，按条号补回来，否则右边一半永远是 0。
-            loudest *= Math.Pow(boost, bar);
+            loudest *= _boostCurve.Length > bar ? _boostCurve[bar] : 1.0;
             double db = 20 * Math.Log10(loudest + 1e-12);
             _db[bar] = db;
             if (db > frameMax) frameMax = db;

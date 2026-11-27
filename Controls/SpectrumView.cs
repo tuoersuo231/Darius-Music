@@ -187,7 +187,11 @@ public sealed class SpectrumView : FrameworkElement
             if (mirrored)
             {
                 // i=0 和 i=count-1 是最外侧的高频，中间是低频。
-                source = (int)Math.Round(Math.Abs(i - (count - 1) / 2.0));
+                // 按比例摊到 0..bands-1：以前用"到中心的距离直接取整"，39 个频段里会有一半
+                // 因为银行家舍入被跳过、另一半被画两遍，看起来又糊又平。
+                double half = (count - 1) / 2.0;
+                double t = half < 0.5 ? 0 : Math.Abs(i - half) / half;
+                source = (int)Math.Round(t * (bands - 1));
             }
             source = Math.Clamp(source, 0, bands - 1);
 
