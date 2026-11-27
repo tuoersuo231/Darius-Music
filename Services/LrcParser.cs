@@ -76,6 +76,9 @@ public static partial class LrcParser
             var body = trimmed[cursor..].TrimEnd();
             var (text, words) = ParseBody(body);
             if (text.Trim().Length == 0 && words.Count == 0) continue;
+            // 旧版/侧车文件里常见的"均匀伪逐字"（每字间隔几乎完全一样，比如严格 155 ms）：
+            // 那不是真的词级时间，标成 estimated，让换源链和本地对齐有机会拿到真的。
+            bool synthesized = LooksSynthesized(words);
 
             foreach (var start in stamps)
             {
@@ -84,6 +87,7 @@ public static partial class LrcParser
                     StartMs = start,
                     EndMs = start,
                     Text = text,
+                    WordsEstimated = synthesized,
                     Words = words.Select(w => new LyricWord
                     {
                         Text = w.Text, StartMs = w.StartMs, EndMs = w.EndMs,
@@ -124,8 +128,32 @@ public static partial class LrcParser
         }
 
         MarkTranslationOnly(lines);
+        // 文档级判定：绝大多数"够长的行"都是均分的，就整篇当成伪逐字（短行样本不足，单独看会漏）。
+        var eligible = lines.Where(l => l.Words.Count >= 5).ToList();
+        if (eligible.Count >= 3 && eligible.Count(l => l.WordsEstimated) * 100 >= eligible.Count * 60)
+        {
+            foreach (var line in lines)
+                if (line.Words.Count > 0) line.WordsEstimated = true;
+        }
         doc.Lines = lines;
         return doc;
+    }
+
+    /// <summary>判断一组字时间是不是"机器均分"出来的：相邻字起点间隔的变异系数极小（&lt;0.05）。
+    /// 真的逐字（哪怕唱得很稳）也一定有几十毫秒的抖动；侧车文件里严格 155 ms 一步的必然是生成的。</summary>
+    public static bool LooksSynthesized(List<LyricWord> words)
+    {
+        var deltas = new List<double>();
+        for (int i = 1; i < words.Count; i++)
+        {
+            long gap = words[i].StartMs - words[i - 1].StartMs;
+            if (gap > 0) deltas.Add(gap);
+        }
+        if (deltas.Count < 5) return false;
+        double mean = deltas.Average();
+        if (mean < 40) return false;
+        double variance = deltas.Average(d => (d - mean) * (d - mean));
+        return Math.Sqrt(variance) / mean < 0.05;
     }
 
     private static (string text, List<LyricWord> words) ParseBody(string body)

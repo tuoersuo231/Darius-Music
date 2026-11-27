@@ -508,6 +508,31 @@ public static class Program
         {
             RunQrcDecode(args);
             return;
+        }
+        if (args.Contains("--gpu-probe"))
+        {
+            Services.AlignQa.RunGpuProbe(args);
+            return;
+        }
+        if (args.Contains("--align-qa"))
+        {
+            Services.AlignQa.RunAlignQa(args);
+            return;
+        }
+        if (args.Contains("--sv-greedy"))
+        {
+            Services.AlignQa.RunGreedy(args);
+            return;
+        }
+        if (args.Contains("--local-align"))
+        {
+            Services.AlignQa.RunLocalAlign(args);
+            return;
+        }
+        if (args.Contains("--compare-cache"))
+        {
+            Services.AlignQa.RunCompareCache(args);
+            return;
         }        if (args.Contains("--chrome-qa"))
         {
             RunChromeQa(app, args, settings);
@@ -3607,8 +3632,23 @@ public static class Program
                 Console.WriteLine(string.Join("\n", lines));
                 return;
             }
+            // --audio：按"本地文件"跑这条链（本地对齐只对本地文件生效，云端行没有文件可解）。
+            if (Arg(args, "--audio") is string audioFile && File.Exists(audioFile))
+            {
+                song = new Models.Song
+                {
+                    Source = Models.SongSource.Local,
+                    Path = audioFile,
+                    NeteaseId = song.NeteaseId,
+                    Title = song.Title,
+                    Artist = song.Artist,
+                    Album = song.Album,
+                    Duration = song.Duration,
+                };
+            }
             lines.Add($"song id={song.NeteaseId} '{song.DisplayTitle}' - '{song.DisplayArtist}' " +
                       $"dur={(int)song.Duration.TotalSeconds}s");
+            lines.Add($"dataDir={Services.AppPaths.DataDir} alignAvailable={Services.LocalAlign.Available}");
             var ctl = new Services.PlayerController(settings);
             foreach (var pass in new[] { "first", "again" })
             {
@@ -3655,6 +3695,27 @@ public static class Program
                         ? "   qq probe: no hit"
                         : $"   qq probe: '{probe.Hit.Name}' - '{probe.Hit.Singer}' {probe.Hit.Interval} " +
                           $"lyric={probe.Lyric.Length}B lines={probe.Lyric.Split('\n').Length}");
+
+                    // --wait-align N：等本地对齐算完并热替换（playback 走的就是这条路）。
+                    if (int.TryParse(Arg(args, "--wait-align"), out var waitSeconds) && waitSeconds > 0)
+                    {
+                        var waitWatch = System.Diagnostics.Stopwatch.StartNew();
+                        bool swapped = false;
+                        while (waitWatch.Elapsed.TotalSeconds < waitSeconds)
+                        {
+                            if (ctl.Lyrics is { } live && Services.LrcParser.HasWordTiming(live))
+                            {
+                                var firstWorded = live.Lines.FirstOrDefault(l => l.HasWordTiming);
+                                lines.Add($"   local align: swapped after {waitWatch.ElapsedMilliseconds}ms " +
+                                          $"realWordTiming={live.Lines.Count(l => l.HasWordTiming)} " +
+                                          $"first='{firstWorded?.Text}'");
+                                swapped = true;
+                                break;
+                            }
+                            System.Threading.Thread.Sleep(200);
+                        }
+                        if (!swapped) lines.Add($"   local align: no swap within {waitSeconds}s");
+                    }
                 }
             }
         }

@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -15,7 +15,7 @@
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <StartupObject>CurrentLyrics.Program</StartupObject>
-    <Version>1.2.87</Version>
+    <Version>1.2.91</Version>
     <Product>Darius Music</Product>
     <AssemblyTitle>Darius Music</AssemblyTitle>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
@@ -46,6 +46,11 @@
 
   <ItemGroup>
     <PackageReference Include="Jint" Version="4.18.1" />
+    <!-- D 方案（本地逐字对齐）：DirectML 后端。只含 win-x64/arm64 的原生库，所以发布必须带 -r win-x64
+         （release.ps1 本来就是这么发的）。 -->
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" />
+    <!-- 解码 mp3/flac 到 16 kHz 单声道采样：Media Foundation 的托管包装，底子还是系统解码器。 -->
+    <PackageReference Include="NAudio" Version="2.2.1" />
   </ItemGroup>
 
 </Project>

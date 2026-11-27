@@ -955,11 +955,29 @@ public sealed class PlayerController : IDisposable
             if (online != null && (local == null || LrcParser.HasWordTiming(online) && SameSong(local, online)))
                 doc = online;
         }
+        bool fromLocal = doc != null && ReferenceEquals(doc, local);
         if (doc != null)
             doc = LrcParser.WithOpeningCard(doc, song.DisplayTitle, song.DisplayArtist, song.Album);
         if (!ReferenceEquals(Current, song)) return;
         Lyrics = doc;
         LyricsChanged?.Invoke();
+        // 落一份"最终用了哪份歌词"的日志：侧车/网易云/换源/本地对齐 四种来源一眼可分。
+        LogApplied(song, cloudId, doc, fromLocal ? "local" : "online");
+    }
+
+    private static void LogApplied(Song song, long cloudId, LyricDocument? doc, string source)
+    {
+        try
+        {
+            int real = doc?.Lines.Count(l => l.HasWordTiming) ?? 0;
+            int estimated = doc?.Lines.Count(l => l.WordsEstimated) ?? 0;
+            var path = Path.Combine(AppPaths.DataDir, "lyrics.log");
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.AppendAllText(path,
+                $"{DateTime.Now:MM-dd HH:mm:ss} applied id={cloudId} '{song.DisplayTitle}' src={source} " +
+                $"lines={doc?.Lines.Count ?? 0} real={real} est={estimated}{Environment.NewLine}");
+        }
+        catch { }
     }
 
     /// <summary>NeteaseDownload names saved tracks `"title - artist [id].ext"`; recover that id so a
@@ -1040,10 +1058,20 @@ public sealed class PlayerController : IDisposable
         // 第二源的词级缓存最优先：命中连网易云都不用问。AMLL（按 id 取，带译文/罗马音）先于 QRC。
         var wordLevel = AmllLyrics.TryCached(cloudId, cached)
                         ?? KugouLyric.TryCached(cloudId, cached)
-                        ?? QqLyric.TryCached(cloudId, cached);
+                        ?? QqLyric.TryCached(cloudId, cached)
+                        ?? LocalAlign.TryCached(cloudId, cached);
         if (wordLevel != null) return wordLevel;
-        if (cached is { Lines.Count: > 0 } && (cached.HasWordTiming || IsFresh(secondSource, 30)))
-            return cached;
+        if (cached is { Lines.Count: > 0 })
+        {
+            if (cached.HasWordTiming) return cached;
+            // 第二源"已经问过"只代表不再联网。本地对齐不是网络源，模型可能是后来才装上的，
+            // 所以这里还要试一次，否则装模型之前放过的歌永远不会被对齐。
+            if (IsFresh(secondSource, 30))
+            {
+                ScheduleLocalAlign(cloudId, song, cached);
+                return cached;
+            }
+        }
 
         string? text = null;
         try { text = await Task.Run(() => NeteaseApi.LyricAsync(cloudId)).ConfigureAwait(false); }
@@ -1075,6 +1103,7 @@ public sealed class PlayerController : IDisposable
                 var inline = await FetchWordLevelAsync(cloudId, song, doc, seconds, tried).ConfigureAwait(false);
                 LogLyric(song, cloudId, inline, tried, probe.ElapsedMilliseconds);
                 if (inline != null) return inline;
+                ScheduleLocalAlign(cloudId, song, doc);
             }
             else
             {
@@ -1094,11 +1123,37 @@ public sealed class PlayerController : IDisposable
         {
             var doc = await FetchWordLevelAsync(cloudId, song, baseDoc, seconds, tried).ConfigureAwait(false);
             LogLyric(song, cloudId, doc, tried, watch.ElapsedMilliseconds);
-            if (doc == null || !ReferenceEquals(Current, song)) return;
+            if (doc == null)
+            {
+                // 三个源都没有 → 才是 D 方案允许调度的时刻。
+                ScheduleLocalAlign(cloudId, song, baseDoc);
+                return;
+            }
+            if (!ReferenceEquals(Current, song)) return;
             Lyrics = LrcParser.WithOpeningCard(doc, song.DisplayTitle, song.DisplayArtist, song.Album);
             LyricsChanged?.Invoke();
         }
         catch { }
+    }
+
+    /// <summary>
+    /// 三个源都没给词级时间时，才允许排一次本地 GPU 对齐。跑完的结果和换源成功一样热替换；
+    /// 没模型、没 GPU、算不动就什么都不发生（界面保持均分 + 收短）。
+    /// </summary>
+    private void ScheduleLocalAlign(long cloudId, Song song, LyricDocument baseDoc)
+    {
+        if (!LocalAlign.Available) return;
+        LocalAlign.Schedule(cloudId, song, baseDoc, Settings.NeteaseQuality, aligned =>
+        {
+            try
+            {
+                if (!ReferenceEquals(Current, song)) return;
+                Lyrics = LrcParser.WithOpeningCard(aligned, song.DisplayTitle, song.DisplayArtist, song.Album);
+                LyricsChanged?.Invoke();
+                LogApplied(song, cloudId, aligned, "align");
+            }
+            catch { }
+        });
     }
 
     /// <summary>

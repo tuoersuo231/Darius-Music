@@ -96,6 +96,48 @@ public static class NeteaseDownload
         }
     }
 
+    /// <summary>
+    /// 只把音频本体抓到临时目录，给本地对齐用：不写封面/歌词、不进资料库。调用方负责删。
+    /// 返回的路径带真实扩展名（MF 解码器靠它挑解析器）。
+    /// </summary>
+    public static async Task<string?> DownloadAudioToTempAsync(Song song, string quality,
+        CancellationToken token = default)
+    {
+        if (song.NeteaseId <= 0) return null;
+        try
+        {
+            var url = song.StreamExpiresAt > DateTime.UtcNow && !string.IsNullOrEmpty(song.StreamUrl)
+                ? song.StreamUrl
+                : null;
+            if (string.IsNullOrEmpty(url))
+            {
+                var resolved = await Task.Run(() => NeteaseApi.ResolveAsync(song.NeteaseId, quality, token), token);
+                url = resolved.Url;
+            }
+            if (string.IsNullOrEmpty(url)) return null;
+
+            var dir = Path.Combine(AppPaths.DataDir, "align", "tmp");
+            Directory.CreateDirectory(dir);
+            var part = Path.Combine(dir, song.NeteaseId + "-" + Guid.NewGuid().ToString("N")[..8] + ".part");
+            using (var response = await Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, token))
+            {
+                response.EnsureSuccessStatusCode();
+                await using var source = await response.Content.ReadAsStreamAsync(token);
+                await using var file = new FileStream(part, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16, true);
+                await source.CopyToAsync(file, 1 << 16, token);
+            }
+
+            var ext = DetectFormat(part) ?? "mp3";
+            var final = Path.ChangeExtension(part, ext);
+            File.Move(part, final, overwrite: true);
+            return new FileInfo(final).Length > 4096 ? final : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     /// <summary>Same naming the phone client uses, so a file mirrored from either side keeps its id.</summary>
     private static string FileNameFor(Song song)
     {
