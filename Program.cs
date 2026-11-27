@@ -5991,6 +5991,18 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
             }
         }
 
+        // QA: 跳到某个播放位置再截图。逐字擦除只有"唱到一半"时才看得出来 —— 整行唱完当然是全亮，
+        // 拿行尾的时间点截图会误以为没有逐字。
+        if (Arg(args, "--seek") is string seekArg && double.TryParse(seekArg, out var seekTarget))
+        {
+            controller.Seek(Math.Max(0, seekTarget));
+            for (int i = 0; i < 16; i++)
+            {
+                app.Dispatcher.Invoke(() => { }, DispatcherPriority.Background);
+                Thread.Sleep(120);
+            }
+        }
+
         // Let the startup WSA import / cover downloads settle before the shot.
         for (int i = 0; i < 20; i++)
         {
@@ -6037,6 +6049,8 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
             for (int i = 0; i < 10; i++) Pump(app, 40);
             Save(main, Path.Combine(dir, "page-narrow.png"));
             pageLines.Add($"narrow: {main.DebugPlayerPageState()}");
+            pageLines.Add($"narrow karaoke: {main.PlayerView?.DebugKaraoke} pos={controller.RawPositionMs:0}");
+            pageLines.Add($"narrow state: {main.PlayerView?.DebugState()}");
 
             main.Width = 1240;
             main.Height = 820;
