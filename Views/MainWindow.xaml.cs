@@ -2462,7 +2462,8 @@ public partial class MainWindow : Window
         }
         else
         {
-            Panel.SetZIndex(bottomSpectrum, 5);
+            // 11 = 在 playerPage(10) 之上：主页和播放页都要看得到。
+            Panel.SetZIndex(bottomSpectrum, 11);
             rootGrid.Children.Add(bottomSpectrum);
         }
     }
@@ -2471,7 +2472,9 @@ public partial class MainWindow : Window
     internal string DebugSpectrumLayer()
     {
         var parent = bottomSpectrum?.Parent as FrameworkElement;
-        return parent == null ? "none" : (ReferenceEquals(parent, themeBackdrop) ? "backdrop" : parent.Name);
+        var name = parent == null ? "none" : (ReferenceEquals(parent, themeBackdrop) ? "backdrop" : parent.Name);
+        return $"{name} z={Panel.GetZIndex(bottomSpectrum)} pageZ={Panel.GetZIndex(playerPage)} " +
+               $"vis={bottomSpectrum?.Visibility} op={bottomSpectrum?.Opacity:0.00}";
     }
 
     /// <summary>QA: switch the themed window backdrop on or off, so the resize cost of the full-window

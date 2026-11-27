@@ -44,10 +44,11 @@ public sealed class SpectrumSettings
     public double Opacity { get; set; } = 1.0;
 
     /// <summary>
-    /// 面板让出多少透明（0..80，百分比）。频谱藏到面板后面时，面板按这个值变半透明，
-    /// 柱子才透得出来。0 = 面板不透（那就一根都看不见），40 = 面板 60% 不透明。
+    /// 面板让出多少透明（0..80，百分比）。只在 <c>Layer=backdrop</c> 时有用：
+    /// 频谱藏在面板后面，面板按这个值变半透明，柱子才透得出来。
+    /// 注意：面板越透，壁纸的颜色会渗进柱子，颜色会偏；<c>overlay</c> 层不会。
     /// </summary>
-    public int PanelSeeThrough { get; set; } = 40;
+    public int PanelSeeThrough { get; set; } = 0;
 
     /// <summary>频段下限（Hz）。600 是皮肤的值；调到 60 会有明显重低音。</summary>
     public double FreqMin { get; set; } = 600;
@@ -91,7 +92,7 @@ public sealed class SpectrumSettings
     /// <c>backdrop</c> = 夹在壁纸和面板之间（真正的"UI 后层"），面板不透明时会被整块挡住，
     /// 要把「界面外观 → 主题不透明度」降到 60% 左右才透得出来。
     /// </summary>
-    public string Layer { get; set; } = "backdrop";
+    public string Layer { get; set; } = "overlay";
 
     /// <summary>Layer 是否等于 backdrop。</summary>
     [JsonIgnore]

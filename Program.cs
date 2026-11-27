@@ -6164,6 +6164,7 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
             var pageLines = new List<string>();
             main.DebugOpenPlayerPage();
             for (int i = 0; i < 10; i++) Pump(app, 40);
+            pageLines.Add($"spectrum layer: {main.DebugSpectrumLayer()}");
             Save(main, Path.Combine(dir, "page-narrow.png"));
             pageLines.Add($"narrow: {main.DebugPlayerPageState()}");
             pageLines.Add($"narrow karaoke: {main.PlayerView?.DebugKaraoke} pos={controller.RawPositionMs:0}");

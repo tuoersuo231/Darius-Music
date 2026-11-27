@@ -558,7 +558,7 @@
       </Grid>
       <!-- 窗口最底部的装饰频谱：不参与布局（所以调高度不会顶动任何面板），
            盖在面板之上、播放页之下，且完全不吃鼠标事件。 -->
-      <ctl:SpectrumView x:Name="bottomSpectrum" Grid.ColumnSpan="2" Panel.ZIndex="5"
+      <ctl:SpectrumView x:Name="bottomSpectrum" Grid.ColumnSpan="2" Panel.ZIndex="11"
                         VerticalAlignment="Bottom" HorizontalAlignment="Stretch" />
       <Grid x:Name="playerPage" Grid.ColumnSpan="2" Visibility="Collapsed" Panel.ZIndex="10" />
     </Grid.Children>

@@ -27,6 +27,7 @@ public sealed class SpectrumView : FrameworkElement
     private SolidColorBrush? _fill;
     private SolidColorBrush? _ghost;
     private Color _cachedFill = Colors.Transparent;
+    private double _cachedAlpha = -1;
     private int _cachedGhostAlpha = -1;
 
     private bool _running;
@@ -83,7 +84,9 @@ public sealed class SpectrumView : FrameworkElement
         if (!options.Enabled) return;
         double wanted = Math.Max(8, options.Height);
         if (double.IsNaN(Height) || Math.Abs(Height - wanted) > 0.5) Height = wanted;
-        Opacity = Math.Clamp(options.Opacity <= 0 ? 1 : options.Opacity, 0, 1);
+        // 透明度不再交给控件级 Opacity：那样会连颜色一起和底色混（用户：颜色变了）。
+        // 改成画的时候按 alpha 上色、颜色先反解，见 OnRender / Unmix。
+        Opacity = 1;
         InvalidateVisual();
     }
 
@@ -155,17 +158,23 @@ public sealed class SpectrumView : FrameworkElement
         var options = SpectrumOptions.Current;
         _options = options;
         Color color = options.ResolveColor();
-        if (_fill == null || color != _cachedFill)
+        double alpha = Math.Clamp(options.Opacity, 0.02, 1);
+        Color panel = PanelColor();
+        // 半透明的柱子会跟底色混，颜色就变了。这里先把颜色反解出来：
+        // 画 a 的透明度、颜色 C'，合成结果正好是 C —— 看起来"淡了"，但色相不跑。
+        Color drawn = Unmix(color, panel, alpha);
+        if (_fill == null || drawn != _cachedFill || alpha != _cachedAlpha)
         {
-            _cachedFill = color;
-            _fill = Freeze(Color.FromArgb(255, color.R, color.G, color.B));
+            _cachedFill = drawn;
+            _cachedAlpha = alpha;
+            _fill = Freeze(Color.FromArgb((byte)Math.Round(alpha * 255), drawn.R, drawn.G, drawn.B));
             _ghost = null;
         }
         int ghostAlpha = Math.Clamp(options.GhostAlpha, 0, 255);
         if (_ghost == null || ghostAlpha != _cachedGhostAlpha)
         {
             _cachedGhostAlpha = ghostAlpha;
-            _ghost = Freeze(Color.FromArgb((byte)ghostAlpha, color.R, color.G, color.B));
+            _ghost = Freeze(Color.FromArgb((byte)Math.Round(ghostAlpha / 255.0 * alpha * 255), drawn.R, drawn.G, drawn.B));
         }
 
         var fast = _service.Read();
@@ -225,5 +234,28 @@ public sealed class SpectrumView : FrameworkElement
         var brush = new SolidColorBrush(color);
         brush.Freeze();
         return brush;
+    }
+
+    /// <summary>柱子底下那层是什么颜色（面板色）。用来把透明度"反解"成不透的颜色。</summary>
+    private Color PanelColor()
+    {
+        try
+        {
+            if (TryFindResource("SurfaceBrush") is SolidColorBrush brush) return brush.Color;
+        }
+        catch { }
+        return Color.FromRgb(0x0D, 0x0F, 0x14);
+    }
+
+    /// <summary>
+    /// 求 C'，使得 <c>alpha*C' + (1-alpha)*back == target</c>。
+    /// 这样柱子按 alpha 画出去，压在面板上的最终颜色还是 target 本身 —— 只是周围的字能透过来。
+    /// </summary>
+    private static Color Unmix(Color target, Color back, double alpha)
+    {
+        if (alpha >= 0.995) return target;
+        double a = Math.Max(0.02, alpha);
+        byte Mix(double t, double b) => (byte)Math.Clamp((t - (1 - a) * b) / a, 0, 255);
+        return Color.FromRgb(Mix(target.R, back.R), Mix(target.G, back.G), Mix(target.B, back.B));
     }
 }
