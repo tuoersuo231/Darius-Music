@@ -2,6 +2,8 @@ using System.IO;
 using System.Text;
 using System.Text.Json;
 using CurrentLyrics.Models;
+using Jint.Native;
+using Jint.Native.Object;
 
 namespace CurrentLyrics.Services;
 
@@ -1284,15 +1286,51 @@ public static class AlignQa
         int skipFirst = int.TryParse(Arg(args, "--skip-first"), out var sf) ? sf : 3;
         bool allowCpu = args.Contains("--allow-cpu");
 
-        if (lrcPath == null || !File.Exists(lrcPath)) { log.Add("missing --lrc"); return; }
+        var songArg2 = Arg(args, "--song");
+        if ((audioPath == null || !File.Exists(audioPath)) && args.Contains("--cloud") && songArg2 != null
+            && long.TryParse(songArg2, out var sid))
+        {
+            var song = new Song
+            {
+                Source = SongSource.Netease,
+                Path = "online:" + sid,
+                NeteaseId = sid,
+                Title = sid.ToString(),
+            };
+            audioPath = NeteaseDownload
+                .DownloadAudioToTempAsync(song, Arg(args, "--quality") ?? "exhigh")
+                .GetAwaiter().GetResult();
+            if (audioPath != null && File.Exists(audioPath))
+                log.Add($"downloaded {new FileInfo(audioPath).Length / 1024}KB -> {Path.GetFileName(audioPath)}");
+        }
+        if (lrcPath == null && !args.Contains("--krc") && songArg2 == null) { log.Add("missing --lrc/--krc"); return; }
         if (audioPath == null || !File.Exists(audioPath)) { log.Add("missing --audio"); return; }
 
         var modelPath = FindModel(args);
         var tokensPath = FindTokens(args, modelPath);
         if (modelPath == null || tokensPath == null) { log.Add("missing --model/--tokens"); return; }
 
-        var truth = LrcParser.Parse(File.ReadAllText(lrcPath, Encoding.UTF8));
-        if (truth == null) { log.Add("lrc parse failed"); return; }
+        var krcPath = Arg(args, "--krc");
+        var songArg = Arg(args, "--song");
+        if (krcPath == null && songArg != null)
+        {
+            var candidate = Path.Combine(AppPaths.DataDir, "lyrics", songArg + ".krc");
+            if (File.Exists(candidate)) krcPath = candidate;
+        }
+        LyricDocument? truth;
+        string truthName;
+        if (krcPath != null && File.Exists(krcPath))
+        {
+            truth = KugouLyric.Parse(File.ReadAllText(krcPath, Encoding.UTF8));
+            truthName = Path.GetFileName(krcPath);
+        }
+        else
+        {
+            truth = LrcParser.Parse(File.ReadAllText(lrcPath!, Encoding.UTF8));
+            truthName = Path.GetFileName(lrcPath!);
+        }
+        if (truth == null) { log.Add("ground truth parse failed"); return; }
+        log.Add($"truth={truthName} lines={truth.Lines.Count} worded={truth.Lines.Count(l => l.HasWordTiming)}");
 
         var pcm = AudioDecode.LoadMono16k(audioPath);
         log.Add($"audio={pcm.Length / 16000.0:0.0}s");
@@ -1602,6 +1640,110 @@ public static class AlignQa
             }
         }
         return result;
+    }
+
+
+    private const string LxMockScript = """
+        /**
+         * @name protocol probe
+         * @description built-in mock source used by --lx-probe
+         * @version 1.0.0
+         * @author darius
+         */
+        const { EVENT_NAMES, request, on, send, utils } = globalThis.lx
+
+        const httpGet = (url) => new Promise((resolve, reject) => {
+          request(url, { method: 'GET' }, (err, resp) => {
+            if (err) return reject(new Error(err))
+            resolve(resp.body)
+          })
+        })
+
+        on(EVENT_NAMES.request, ({ source, action, info }) => {
+          switch (action) {
+            case 'musicUrl':
+              return Promise.resolve('http://example.com/a.mp3')
+            case 'lyric':
+              return Promise.resolve({
+                lyric: '[00:01.00]hello\n[00:03.50]world',
+                tlyric: '',
+                lxlyric: '',
+              })
+            case 'pic':
+              return Promise.resolve('http://example.com/cover.jpg')
+            default:
+              return Promise.reject(new Error('unsupported action ' + action))
+          }
+        })
+
+        send(EVENT_NAMES.inited, {
+          sources: {
+            kw: { name: 'probe-kw', type: 'music', actions: ['musicUrl', 'lyric'], qualitys: ['128k', '320k'] },
+          },
+        })
+        """;
+
+    /// <summary>--lx-probe [script.js]: load an LX custom-source script (or the built-in mock) and
+    /// exercise the protocol: init event, source table, musicUrl / lyric / pic requests, and the
+    /// host utilities (buffer / md5 / http).</summary>
+    public static void RunLxProbe(string[] args)
+    {
+        var log = new List<string>();
+        var path = Arg(args, "--lx-probe");
+        try
+        {
+            LxHost host;
+            if (!string.IsNullOrEmpty(path) && File.Exists(path))
+            {
+                log.Add($"script={Path.GetFileName(path)} ({new FileInfo(path).Length} B)");
+                host = LxHost.Load(path);
+            }
+            else if (!string.IsNullOrEmpty(path))
+            {
+                log.Add($"script not found: {path}");
+                return;
+            }
+            else
+            {
+                log.Add("script=(built-in mock)");
+                host = LxHost.LoadFromText(LxMockScript, "mock");
+            }
+
+            using (host)
+            {
+                log.Add($"name='{host.Name}' version='{host.Version}' author='{host.Author}'");
+                log.Add($"inited={host.Inited} initError={host.InitError ?? "(none)"}");
+                foreach (var src in host.Sources.Values)
+                    log.Add($"  source '{src.Key}' name='{src.Name}' actions=[{string.Join(",", src.Actions)}] " +
+                            $"qualitys=[{string.Join(",", src.Qualitys)}]");
+
+                if (host.Sources.Count == 0)
+                {
+                    log.Add("no sources declared");
+                    return;
+                }
+
+                var first = host.Sources.Keys.First();
+                var info = host.MakeMusicInfo("test-mid", "test song", "test singer", "test album");
+
+                var url = host.Request(first, "musicUrl", info);
+                log.Add($"musicUrl: ok={url.Ok} err={url.Error ?? "-"} value={LxHost.Describe(url.Value)}");
+
+                var lyric = host.Request(first, "lyric", info);
+                log.Add($"lyric:    ok={lyric.Ok} err={lyric.Error ?? "-"} value={LxHost.Describe(lyric.Value)}");
+
+                var pic = host.Request(first, "pic", info);
+                log.Add($"pic:      ok={pic.Ok} err={pic.Error ?? "-"} value={LxHost.Describe(pic.Value)}");
+
+                // host utilities
+                log.Add("utils: " + host.ProbeUtilities());
+            }
+        }
+        catch (Exception ex)
+        {
+            log.Add("failed: " + ex.GetType().Name + " " + ex.Message);
+        }
+        Console.WriteLine(string.Join("\n", log));
     }
 
 }

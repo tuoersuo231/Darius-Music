@@ -534,6 +534,11 @@ public static class Program
             Services.AlignQa.RunCompareCache(args);
             return;
         }
+        if (args.Contains("--lx-probe"))
+        {
+            Services.AlignQa.RunLxProbe(args);
+            return;
+        }
         if (args.Contains("--hybrid-align"))
         {
             Services.AlignQa.RunHybridAlign(args);

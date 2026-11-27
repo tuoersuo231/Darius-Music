@@ -124,6 +124,20 @@ public static class LocalAlign
                     }
                     LogRaw($"trace id={songId} downloaded {new FileInfo(audioPath).Length / 1024}KB " +
                            $"({watch.ElapsedMilliseconds}ms)");
+                    // QA hook: keep the temp audio so offline tools can re-run alignment on the exact
+                    // same bytes the online path used.
+                    var keepDir = Environment.GetEnvironmentVariable("DARIUS_KEEP_AUDIO");
+                    if (!string.IsNullOrWhiteSpace(keepDir))
+                    {
+                        try
+                        {
+                            Directory.CreateDirectory(keepDir);
+                            var target = Path.Combine(keepDir, songId + Path.GetExtension(audioPath));
+                            File.Copy(audioPath, target, true);
+                            LogRaw($"trace id={songId} kept-audio {target}");
+                        }
+                        catch (Exception kex) { LogRaw($"trace id={songId} keep-audio failed {kex.Message}"); }
+                    }
                 }
 
                 var pcm = AudioDecode.LoadMono16k(audioPath);
