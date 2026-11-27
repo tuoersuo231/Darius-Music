@@ -73,8 +73,13 @@ public static class KugouLyric
             {
                 var doc = Fetch(title, artist, expectedSeconds, baseDoc);
                 if (doc == null) return null;
-                Directory.CreateDirectory(CacheDir);
-                File.WriteAllText(Path.Combine(CacheDir, songId + ".krc"), Serialize(doc));
+                // Best-effort cache: a read-only data folder must not make this source report a miss.
+                try
+                {
+                    Directory.CreateDirectory(CacheDir);
+                    File.WriteAllText(Path.Combine(CacheDir, songId + ".krc"), Serialize(doc));
+                }
+                catch { }
                 return doc;
             }
             catch

@@ -58,8 +58,14 @@ public static class AmllLyrics
                 var ttml = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
                 var doc = Parse(ttml);
                 if (doc == null) return null;
-                Directory.CreateDirectory(CacheDir);
-                File.WriteAllText(Path.Combine(CacheDir, ncmId + ".ttml"), ttml);
+                // Cache write is best-effort: a read-only data folder must not turn a perfectly good
+                // TTML into "this source found nothing" (that is how the 打上花火 run looked).
+                try
+                {
+                    Directory.CreateDirectory(CacheDir);
+                    File.WriteAllText(Path.Combine(CacheDir, ncmId + ".ttml"), ttml);
+                }
+                catch { }
                 return doc;
             }
             catch

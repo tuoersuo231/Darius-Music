@@ -44,6 +44,17 @@ public static class LrclibLyric
 
     private static string CacheDir => Path.Combine(AppPaths.DataDir, "lyrics");
 
+    private static void Trace(string message)
+    {
+        try
+        {
+            Directory.CreateDirectory(CacheDir);
+            File.AppendAllText(Path.Combine(CacheDir, "lrclib.log"),
+                $"{DateTime.Now:HH:mm:ss} {message}{Environment.NewLine}");
+        }
+        catch { }
+    }
+
     // ---------- public ----------
 
     public static async Task<LyricDocument?> EnsureAsync(long songId, string title, string artist,
@@ -125,12 +136,17 @@ public static class LrclibLyric
             if (shift != 0) QqLyric.ApplyShift(doc, shift);
             if (songId > 0)
             {
+                var target = Path.Combine(CacheDir, songId + ".lrclib");
                 try
                 {
                     Directory.CreateDirectory(CacheDir);
-                    File.WriteAllText(Path.Combine(CacheDir, songId + ".lrclib"), raw, Encoding.UTF8);
+                    File.WriteAllText(target, raw, Encoding.UTF8);
                 }
-                catch { }
+                catch (Exception e)
+                {
+                    // 只记失败：写盘失败会让每次播放都重新联网，值得留一行线索。
+                    Trace($"write {target} failed {e.GetType().Name} {e.Message}");
+                }
             }
             return doc;
         }

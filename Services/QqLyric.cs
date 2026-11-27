@@ -77,12 +77,17 @@ public static class QqLyric
                 // (even without the base document at hand) puts the words back in the same place.
                 long shift = EstimateShift(doc, baseDoc);
                 if (shift != 0) ApplyShift(doc, shift);
-                Directory.CreateDirectory(CacheDir);
-                File.WriteAllText(System.IO.Path.Combine(CacheDir, songId + ".qrc"), payload.Lyric);
-                if (payload.Translation.Length > 0)
-                    File.WriteAllText(System.IO.Path.Combine(CacheDir, songId + ".qrc.ts"), payload.Translation);
-                File.WriteAllText(System.IO.Path.Combine(CacheDir, songId + ".qrc.shift"),
-                    shift.ToString(CultureInfo.InvariantCulture));
+                // Best-effort cache: a read-only data folder must not make this source report a miss.
+                try
+                {
+                    Directory.CreateDirectory(CacheDir);
+                    File.WriteAllText(System.IO.Path.Combine(CacheDir, songId + ".qrc"), payload.Lyric);
+                    if (payload.Translation.Length > 0)
+                        File.WriteAllText(System.IO.Path.Combine(CacheDir, songId + ".qrc.ts"), payload.Translation);
+                    File.WriteAllText(System.IO.Path.Combine(CacheDir, songId + ".qrc.shift"),
+                        shift.ToString(CultureInfo.InvariantCulture));
+                }
+                catch { }
                 return doc;
             }
             catch

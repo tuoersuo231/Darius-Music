@@ -2829,6 +2829,7 @@ public static class Program
     private static void RunWordLevelTest(string[] args)
     {
         var lines = new List<string>();
+        lines.Add($"data={Services.AppPaths.DataDir}");
         foreach (var item in args.SkipWhile(a => a != "--wordlevel-test").Skip(1)
                      .TakeWhile(a => !a.StartsWith("--")))
         {
