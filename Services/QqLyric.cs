@@ -320,7 +320,7 @@ public static class QqLyric
     /// the share of unique lines the two documents have in common ("the English MIREI ver." of a
     /// Japanese track shares none), and the interquartile spread of line-start deltas (a live or
     /// re-arranged version scatters by whole seconds, a re-mastered one barely moves).</summary>
-    private static bool AgreesWith(LyricDocument candidate, LyricDocument? baseDoc)
+    internal static bool AgreesWith(LyricDocument candidate, LyricDocument? baseDoc)
     {
         double overlap = LineOverlap(candidate, baseDoc);
         if (overlap < 0) return true;                 // nothing to compare against
@@ -411,7 +411,7 @@ public static class QqLyric
     /// <summary>Removes bracketed qualifiers ("（Cover）", "(Live)") for the search term.</summary>
     private static string Brackets(string text) => BracketTail.Replace(text ?? "", " ");
 
-    private static string Normalize(string text)
+    internal static string Normalize(string text)
     {
         if (string.IsNullOrEmpty(text)) return "";
         text = BracketTail.Replace(text, "");
@@ -419,7 +419,10 @@ public static class QqLyric
         foreach (var ch in text)
         {
             if (char.IsWhiteSpace(ch)) continue;
-            if (ch is '·' or '-' or '_' or '\'' or '’' or '/' or '、') continue;
+            // 波浪线和各种横线一律忽略：酷狗写「願い〜あの頃のキミへ〜」（U+301C），网易云写「～」（U+FF5E），
+            // 不归一化就永远匹配不上。
+            if (ch is '·' or '-' or '_' or '\'' or '’' or '/' or '、' or
+                '～' or '〜' or '~' or '－' or '—' or '–' or '‐' or '‑' or '−') continue;
             sb.Append(char.ToLowerInvariant(ch));
         }
         return sb.ToString();

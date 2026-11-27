@@ -1037,8 +1037,10 @@ public sealed class PlayerController : IDisposable
         var secondSource = Path.Combine(AppPaths.DataDir, "lyrics", cloudId + ".qsb");
         LyricDocument? cached = TryReadLyric(file);
 
-        // 第二源的词级缓存最优先：命中连网易云都不用问。
-        var wordLevel = QqLyric.TryCached(cloudId, cached);
+        // 第二源的词级缓存最优先：命中连网易云都不用问。AMLL（按 id 取，带译文/罗马音）先于 QRC。
+        var wordLevel = AmllLyrics.TryCached(cloudId, cached)
+                        ?? KugouLyric.TryCached(cloudId, cached)
+                        ?? QqLyric.TryCached(cloudId, cached);
         if (wordLevel != null) return wordLevel;
         if (cached is { Lines.Count: > 0 } && (cached.HasWordTiming || IsFresh(secondSource, 30)))
             return cached;
@@ -1068,20 +1070,35 @@ public sealed class PlayerController : IDisposable
             int seconds = (int)song.Duration.TotalSeconds;
             if (_waitForWordLevel)
             {
-                LyricDocument? upgraded;
-                try
+                LyricDocument? upgraded = null;
+                try { upgraded = await AmllLyrics.EnsureAsync(cloudId, doc).ConfigureAwait(false); }
+                catch { }
+                if (upgraded == null)
                 {
-                    upgraded = await QqLyric
-                        .EnsureAsync(cloudId, song.DisplayTitle, song.DisplayArtist, doc, seconds)
-                        .ConfigureAwait(false);
+                    try
+                    {
+                        upgraded = await KugouLyric
+                            .EnsureAsync(cloudId, song.DisplayTitle, song.DisplayArtist, seconds, doc)
+                            .ConfigureAwait(false);
+                    }
+                    catch { upgraded = null; }
                 }
-                catch { upgraded = null; }
+                if (upgraded == null)
+                {
+                    try
+                    {
+                        upgraded = await QqLyric
+                            .EnsureAsync(cloudId, song.DisplayTitle, song.DisplayArtist, doc, seconds)
+                            .ConfigureAwait(false);
+                    }
+                    catch { upgraded = null; }
+                }
                 if (upgraded != null) return upgraded;
             }
             else
             {
                 // Show the NetEase text now, swap in the word-level one when it arrives: waiting for
-                // Tencent here would delay the lyrics by a second or two on every first play.
+                // the network here would delay the lyrics by a second or two on every first play.
                 _ = UpgradeToWordLevelAsync(cloudId, song, doc, seconds);
             }
         }
@@ -1092,7 +1109,14 @@ public sealed class PlayerController : IDisposable
     {
         try
         {
-            var doc = await QqLyric
+            // AMLL first: exact by song id, and it carries the translation and romanisation with it.
+            var doc = await AmllLyrics.EnsureAsync(cloudId, baseDoc, TimeSpan.FromSeconds(10))
+                .ConfigureAwait(false);
+            doc ??= await KugouLyric
+                .EnsureAsync(cloudId, song.DisplayTitle, song.DisplayArtist, seconds, baseDoc,
+                    TimeSpan.FromSeconds(15))
+                .ConfigureAwait(false);
+            doc ??= await QqLyric
                 .EnsureAsync(cloudId, song.DisplayTitle, song.DisplayArtist, baseDoc, seconds,
                     TimeSpan.FromSeconds(20))
                 .ConfigureAwait(false);

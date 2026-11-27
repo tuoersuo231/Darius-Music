@@ -494,6 +494,16 @@ public static class Program
             RunOnlineLyricQa(args, settings);
             return;
         }
+        if (args.Contains("--amll-qa"))
+        {
+            RunAmllQa(args, settings);
+            return;
+        }
+        if (args.Contains("--kugou-qa"))
+        {
+            RunKugouQa(args, settings);
+            return;
+        }
         if (args.Contains("--qrc-dec"))
         {
             RunQrcDecode(args);
@@ -3676,6 +3686,108 @@ public static class Program
         return builder.ToString();
 
         static string Time(long ms) => $"{(ms / 60000):00}:{(ms / 1000 % 60):00}.{ms % 1000:000}";
+    }
+
+    /// <summary>QA: 酷狗 KRC 单独跑一遍（--kugou-qa "歌名"）：搜索命中、下载字节、解密后的行/字数、
+    /// 与网易云那份的文本重合度与时间轴偏移。</summary>
+    private static void RunKugouQa(string[] args, AppSettings settings)
+    {
+        string query = Arg(args, "--kugou-qa") ?? "願い～あの頃のキミ～";
+        string report = Arg(args, "--report") ?? "kugou-qa.txt";
+        var lines = new List<string> { $"query={query}" };
+        try
+        {
+            Services.NeteaseApi.Cookie = settings.NeteaseCookie;
+            Services.NeteaseApi.Quality = settings.NeteaseQuality;
+            var page = Services.NeteaseApi.SearchAsync(query, 2).GetAwaiter().GetResult();
+            foreach (var song in page.Songs.Take(2))
+            {
+                var neteaseText = Services.NeteaseApi.LyricAsync(song.NeteaseId).GetAwaiter().GetResult() ?? "";
+                var netease = Services.LrcParser.Parse(neteaseText);
+                lines.Add($"netease id={song.NeteaseId} '{song.DisplayTitle}' - '{song.DisplayArtist}' " +
+                          $"lines={netease.Lines.Count} hasWordTiming={Services.LrcParser.HasWordTiming(netease)}");
+
+                var watch = System.Diagnostics.Stopwatch.StartNew();
+                var doc = Task.Run(() => Services.KugouLyric.EnsureAsync(song.NeteaseId,
+                        song.DisplayTitle, song.DisplayArtist, (int)song.Duration.TotalSeconds, netease))
+                    .GetAwaiter().GetResult();
+                watch.Stop();
+                if (doc == null)
+                {
+                    lines.Add($"   kugou: no lyric ({watch.ElapsedMilliseconds}ms)");
+                    continue;
+                }
+                int worded = doc.Lines.Count(l => l.Words.Count > 1);
+                lines.Add($"   kugou: {watch.ElapsedMilliseconds}ms lines={doc.Lines.Count} withWords={worded} " +
+                          $"overlap={Services.QqLyric.LineOverlap(doc, netease):0.00} " +
+                          $"shift={Services.QqLyric.Estimate(doc, netease)}");
+                foreach (var line in doc.Lines.Skip(1).Take(2))
+                {
+                    lines.Add($"   [{line.StartMs}-{line.EndMs}] '{line.Text}'");
+                    lines.Add("   " + string.Join(" ", line.Words.Take(8)
+                        .Select(w => $"{w.Text}@{w.StartMs}-{w.EndMs}")));
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            lines.Add("failed: " + ex.GetType().Name + " " + ex.Message);
+        }
+        File.WriteAllLines(report, lines);
+        Console.WriteLine(string.Join("\n", lines));
+    }
+
+    /// <summary>QA: AMLL（Apple Music TTML 社区库）单独跑一遍。参数可以是网易云 id，也可以是歌名。
+    /// 打印：命中/未命中、行数、逐字行数、译文与罗马音行数、前两行的字时间（--amll-qa）。</summary>
+    private static void RunAmllQa(string[] args, AppSettings settings)
+    {
+        string query = Arg(args, "--amll-qa") ?? "536622304";
+        string report = Arg(args, "--report") ?? "amll-qa.txt";
+        var lines = new List<string> { $"query={query}" };
+        try
+        {
+            var ids = new List<long>();
+            if (long.TryParse(query, out var direct)) ids.Add(direct);
+            else
+            {
+                Services.NeteaseApi.Cookie = settings.NeteaseCookie;
+                Services.NeteaseApi.Quality = settings.NeteaseQuality;
+                var page = Services.NeteaseApi.SearchAsync(query, 3).GetAwaiter().GetResult();
+                foreach (var song in page.Songs) ids.Add(song.NeteaseId);
+                lines.Add("netease ids=[" + string.Join(",", ids) + "]");
+            }
+
+            foreach (var id in ids)
+            {
+                var watch = System.Diagnostics.Stopwatch.StartNew();
+                var doc = Task.Run(() => Services.AmllLyrics.EnsureAsync(id, null)).GetAwaiter().GetResult();
+                watch.Stop();
+                if (doc == null)
+                {
+                    lines.Add($"{id}: no AMLL lyric ({watch.ElapsedMilliseconds}ms)");
+                    continue;
+                }
+                int worded = doc.Lines.Count(l => l.Words.Count > 1);
+                lines.Add($"{id}: {watch.ElapsedMilliseconds}ms lines={doc.Lines.Count} withWords={worded} " +
+                          $"translations={doc.Lines.Count(l => l.Translation.Length > 0)} " +
+                          $"romaji={doc.Lines.Count(l => l.Romanization.Length > 0)} " +
+                          $"hasWordTiming={Services.LrcParser.HasWordTiming(doc)}");
+                foreach (var line in doc.Lines.Skip(1).Take(2))
+                {
+                    lines.Add($"   [{line.StartMs}-{line.EndMs}] '{line.Text}'");
+                    lines.Add("   " + string.Join(" ", line.Words.Take(8)
+                        .Select(w => $"{w.Text}@{w.StartMs}-{w.EndMs}")));
+                    if (line.Translation.Length > 0) lines.Add("   译：" + line.Translation);
+                    if (line.Romanization.Length > 0) lines.Add("   音：" + line.Romanization);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            lines.Add("failed: " + ex.GetType().Name + " " + ex.Message);
+        }
+        File.WriteAllLines(report, lines);
+        Console.WriteLine(string.Join("\n", lines));
     }
 
     /// <summary>QA: QRC 解码器单独跑一遍（--qrc-dec 音乐id / --qrc-dec file:hex文件）。</summary>
