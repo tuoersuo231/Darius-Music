@@ -100,11 +100,14 @@ public static class VersionStore
     {
         if (Layout.VersionsDir is not { } dir) return;
         var current = Current();
+        // 正在运行的这一个永远不删：哪怕 keepVersions 被写成 0，也不能把自己拆了。
+        var running = Path.GetFileName(AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar));
         var all = Installed().OrderByDescending(VersionKey).ToList();
         int others = 0;
         foreach (var version in all)
         {
             if (string.Equals(version, current, StringComparison.OrdinalIgnoreCase)) continue;
+            if (string.Equals(version, running, StringComparison.OrdinalIgnoreCase)) continue;
             if (others < keep)
             {
                 others++;
@@ -148,5 +151,47 @@ public static class VersionStore
         }
         catch { }
         return null;
+    }
+
+    /// <summary>`config.json` 里的 keepVersions：除了当前版本，还留几个旧版本（默认 1，用于回滚）。</summary>
+    public static int KeepVersions(int fallback = 1)
+    {
+        try
+        {
+            if (!File.Exists(Layout.ConfigPath)) return fallback;
+            using var doc = JsonDocument.Parse(File.ReadAllText(Layout.ConfigPath));
+            if (doc.RootElement.TryGetProperty("keepVersions", out var value) &&
+                value.ValueKind == JsonValueKind.Number &&
+                value.TryGetInt32(out var keep))
+                return Math.Max(0, keep);
+        }
+        catch { }
+        return fallback;
+    }
+
+    /// <summary>
+    /// 启动时顺手清一遍安装目录。为什么程序里也要做一份：
+    /// 真正负责删旧版本的是启动器，而它只在**程序退出之后**才 Trim —— 用户更新完直接关机、
+    /// 或者从任务管理器结束进程、或者绕过启动器双击版本目录里的 exe，那一份旧版本就一直留着
+    /// （100 MB 一份）。另外 `current.txt.*.bak` 是旧版启动器留下的，没人清。
+    /// </summary>
+    public static void CleanInstallFolder()
+    {
+        // VersionsDir 是在第一次访问 Layout.Root 时才探测出来的，所以必须先碰一下 Root。
+        _ = Layout.Root;
+        if (Layout.VersionsDir is not { } versions) return;
+        try { Trim(KeepVersions()); } catch { }
+        try
+        {
+            // 半成品版本目录：装在临时目录时崩了会留下 vX.tmp。
+            if (Directory.Exists(versions))
+                foreach (var dir in Directory.GetDirectories(versions, "*.tmp"))
+                    try { Directory.Delete(dir, true); } catch { }
+
+            // 旧版启动器切指针时留下的备份（current.txt.v1.2.87.bak 之类），纯残留。
+            foreach (var file in Directory.GetFiles(Layout.Root, "current.txt.*.bak"))
+                try { File.Delete(file); } catch { }
+        }
+        catch { }
     }
 }

@@ -32,12 +32,15 @@ public static class Program
             return;
         }
 
-        AppDomain.CurrentDomain.UnhandledException += (_, e) => Crashing(e.ExceptionObject as Exception, "domain");
-        System.Windows.Threading.Dispatcher.CurrentDispatcher.UnhandledException += (_, e) =>
+        AppDomain.CurrentDomain.UnhandledException += (_, e) => Crashing(e.ExceptionObject as Exception, "domain");        System.Windows.Threading.Dispatcher.CurrentDispatcher.UnhandledException += (_, e) =>
         {
             Crashing(e.Exception, "dispatcher");
             e.Handled = true;
         };
+        // 清安装目录：旧版本目录、半成品 *.tmp、旧版启动器留下的 current.txt.*.bak。
+        // 启动器只在"程序退出后"才做这件事，绕过启动器启动的机器就一直不清理。
+        try { Services.VersionStore.CleanInstallFolder(); } catch { }
+
         System.Threading.Tasks.TaskScheduler.UnobservedTaskException += (_, e) => Crashing(e.Exception, "task");
 
         var app = new Application
