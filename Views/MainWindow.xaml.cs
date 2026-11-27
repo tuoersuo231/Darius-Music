@@ -2468,6 +2468,14 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>QA：背景暗度，走和界面外观滑块同一条路。</summary>
+    internal string DebugSetScrim(double value)
+    {
+        _settings.ThemeScrim = Math.Clamp(value, 0, 100);
+        ApplyAppearance();
+        return $"scrim={_settings.ThemeScrim:0} opacity={themeScrim?.Opacity:0.00}";
+    }
+
     /// <summary>QA：把当前频谱挂载位置报出来（overlay / backdrop / 无父级）。</summary>
     internal string DebugSpectrumLayer()
     {
@@ -2804,6 +2812,8 @@ public partial class MainWindow : Window
 
         double opacity = Math.Clamp(_settings.ThemeOpacity, 0, 100) / 100.0;
         themeBackdrop.Opacity = opacity;
+        // 背景暗度：和播放页的「背景暗度」一样，就是一层黑压在壁纸上。
+        if (themeScrim != null) themeScrim.Opacity = Math.Clamp(_settings.ThemeScrim, 0, 100) / 100.0;
 
         if (coverMode)
         {

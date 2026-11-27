@@ -90,6 +90,7 @@ public sealed class AppSettings
     public string ThemeSurface { get; set; } = Palette.DefaultSurface; // 背景色
     public double ThemeOpacity { get; set; } = 100;   // 背景不透明度 0..100
     public double ThemeBlur { get; set; } = 0;        // 背景磨砂 0..60 px
+    public double ThemeScrim { get; set; } = 0;       // 背景暗度 0..100（铺一层黑，越大越暗）
     public string ThemeImage { get; set; } = "";      // 自定义背景图，空 = 不用图
 
     /// <summary>
@@ -117,6 +118,8 @@ public sealed class AppSettings
     public string PlayerTextColor { get; set; } = "FFFFFF"; // 歌词文字颜色
     public double PlayerBackdropBlur { get; set; } = 42;  // 背景模糊
     public double PlayerBackdropOpacity { get; set; } = 0.62; // 背景暗度（越大越暗）
+    /// <summary>播放页：歌词画在频谱之上（关掉则频谱盖在歌词上）。</summary>
+    public bool PlayerLyricsAboveSpectrum { get; set; } = true;
     public double Scale { get; set; } = 1.0;        // global size multiplier
     public string FontFamily { get; set; } = "Microsoft YaHei UI";
     public double Volume { get; set; } = 0.85;
@@ -274,6 +277,7 @@ public sealed class AppSettings
         ThemeSurface = Palette.Normalize(ThemeSurface, Palette.DefaultSurface),
         ThemeOpacity = Math.Clamp(ThemeOpacity, 0, 100),
         ThemeBlur = Math.Clamp(ThemeBlur, 0, 60),
+        ThemeScrim = Math.Clamp(ThemeScrim, 0, 100),
         ThemeImage = ThemeImage ?? "",
         RecentSurfaceColors = (RecentSurfaceColors ?? new List<string>())
             .Select(h => (h ?? "").Trim().TrimStart('#').ToUpperInvariant())

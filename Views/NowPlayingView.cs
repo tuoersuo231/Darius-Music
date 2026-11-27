@@ -97,6 +97,19 @@ public sealed class NowPlayingView : Grid
     public event Action? BackRequested;
     public event Action? DesktopLyricsToggled;
 
+    /// <summary>播放页里那份频谱（夹在背景和内容之间）。</summary>
+    private Controls.SpectrumView? _spectrum;
+
+    /// <summary>
+    /// 歌词和频谱谁在上面。默认歌词在上面（频谱只当背景）；
+    /// 关掉「字幕在频谱之上」时把频谱抬到内容之上，柱子就盖过歌词了。
+    /// </summary>
+    private void ApplySpectrumOrder()
+    {
+        if (_spectrum == null) return;
+        Panel.SetZIndex(_spectrum, _settings.PlayerLyricsAboveSpectrum ? 0 : 500);
+    }
+
     public NowPlayingView(PlayerController player, AppSettings settings)
     {
         _player = player;
@@ -379,8 +392,10 @@ public sealed class NowPlayingView : Grid
             HorizontalAlignment = HorizontalAlignment.Stretch,
             OnlyInBackdrop = true,
         };
+        _spectrum = spectrum;
         _root.Children.Add(spectrum);
         _root.Children.Add(_content);
+        ApplySpectrumOrder();
         _root.Children.Add(_backButton);
         _root.Children.Add(_moreButton);
         _root.Children.Add(_moreScrim);
@@ -1085,12 +1100,24 @@ public sealed class NowPlayingView : Grid
             v => $"{v:0}", v => _settings.PlayerBackdropBlur = Math.Round(v));
         SliderRow(stack, "背景暗度", 0, 100, _settings.PlayerBackdropOpacity * 100,
             v => $"{v:0}%", v => _settings.PlayerBackdropOpacity = Math.Round(v) / 100.0);
+        SwitchRow(stack, "字幕在频谱之上", _settings.PlayerLyricsAboveSpectrum, on =>
+        {
+            _settings.PlayerLyricsAboveSpectrum = on;
+            ApplySpectrumOrder();
+        });
         return stack;
     }
 
-    private void SliderRow(StackPanel parent, string label, double min, double max, double value,
-                           Func<double, string> format, Action<double> apply, double snap = 0)
+    /// <summary>QA：切换「字幕在频谱之上」。</summary>
+    internal string DebugSetLyricsAbove(bool on)
     {
+        _settings.PlayerLyricsAboveSpectrum = on;
+        ApplySpectrumOrder();
+        return $"lyricsAbove={on} spectrumZ={(_spectrum == null ? -1 : Panel.GetZIndex(_spectrum))}";
+    }
+
+    private void SliderRow(StackPanel parent, string label, double min, double max, double value,
+                           Func<double, string> format, Action<double> apply, double snap = 0)    {
         var head = new Grid { Margin = new Thickness(0, 10, 0, 0) };
         var name = new TextBlock
         {

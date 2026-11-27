@@ -6088,6 +6088,11 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
         app.Dispatcher.Invoke(() => { }, DispatcherPriority.Background);
         Save(main, Path.Combine(dir, "main.png"));
         File.WriteAllText(Path.Combine(dir, "layout.txt"), main.DebugLayout());
+        // 背景暗度（主界面）
+        File.AppendAllText(Path.Combine(dir, "layout.txt"),
+            Environment.NewLine + "scrim: " + main.DebugSetScrim(60));
+        for (int i = 0; i < 8; i++) Pump(app, 80);
+        Save(main, Path.Combine(dir, "main-scrim.png"));
         if (main.FindName("bottomSpectrum") is Controls.SpectrumView homeSpectrum)
             File.AppendAllText(Path.Combine(dir, "layout.txt"),
                 Environment.NewLine + "spectrum: " + homeSpectrum.DebugState);
@@ -6175,6 +6180,13 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
             for (int i = 0; i < 12; i++) Pump(app, 40);
             Save(main, Path.Combine(dir, "page-wide.png"));
             pageLines.Add($"wide: {main.DebugPlayerPageState()}");
+            // 字幕在频谱之上关掉 → 柱子盖到歌词上
+            pageLines.Add($"lyrics above on: {main.PlayerView?.DebugSetLyricsAbove(true)}");
+            for (int i = 0; i < 6; i++) Pump(app, 40);
+            Save(main, Path.Combine(dir, "page-lyrics-above.png"));
+            pageLines.Add($"lyrics above off: {main.PlayerView?.DebugSetLyricsAbove(false)}");
+            for (int i = 0; i < 6; i++) Pump(app, 40);
+            Save(main, Path.Combine(dir, "page-spectrum-above.png"));
 
             main.Width = 1180;
             main.Height = 760;

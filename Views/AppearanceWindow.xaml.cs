@@ -50,6 +50,12 @@ public partial class AppearanceWindow : Window
             txtThemeBlur.Text = $"{e.NewValue:0} px";
             Apply(s => s.ThemeBlur = Math.Round(e.NewValue));
         };
+        sldThemeScrim.ValueChanged += (_, e) =>
+        {
+            if (_initializing) return;
+            txtThemeScrim.Text = $"{e.NewValue:0}%";
+            Apply(s => s.ThemeScrim = Math.Round(e.NewValue));
+        };
         chkMinimizeOnClose.Checked += (_, _) =>
         {
             if (!_initializing) Apply(s => s.MinimizeOnClose = true);
@@ -250,6 +256,7 @@ public partial class AppearanceWindow : Window
         txtThemeBlur.Text = $"{_settings.ThemeBlur:0} px";
         sldThemeOpacity.Value = Math.Clamp(_settings.ThemeOpacity, 0, 100);
         sldThemeBlur.Value = Math.Clamp(_settings.ThemeBlur, 0, 60);
+        sldThemeScrim.Value = Math.Clamp(_settings.ThemeScrim, 0, 100);
         chkMinimizeOnClose.IsChecked = _settings.MinimizeOnClose;
         RefreshFields();
     }
@@ -273,6 +280,7 @@ public partial class AppearanceWindow : Window
         bool hasBackdrop = cover || (image.Length > 0 && File.Exists(image));
         sldThemeOpacity.IsEnabled = hasBackdrop;
         sldThemeBlur.IsEnabled = hasBackdrop;
+        sldThemeScrim.IsEnabled = hasBackdrop;
         sldThemeOpacity.Opacity = hasBackdrop ? 1 : 0.4;
         sldThemeBlur.Opacity = hasBackdrop ? 1 : 0.4;
         txtThemeOpacity.Opacity = hasBackdrop ? 1 : 0.4;

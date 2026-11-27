@@ -46,6 +46,13 @@
                             </Grid>
                             <controls:DragOnlySlider x:Name="sldThemeBlur" Style="{StaticResource ThinSlider}" Minimum="0" Maximum="60" Margin="0,8,0,0" />
                         </StackPanel>
+                        <StackPanel Margin="0,12">
+                            <Grid>
+                                <TextBlock Text="背景暗度" FontSize="13" />
+                                <TextBlock x:Name="txtThemeScrim" Text="0%" HorizontalAlignment="Right" FontSize="12" Foreground="{DynamicResource AccentBrush}" />
+                            </Grid>
+                            <controls:DragOnlySlider x:Name="sldThemeScrim" Style="{StaticResource ThinSlider}" Minimum="0" Maximum="100" Margin="0,8,0,0" />
+                        </StackPanel>
                         <StackPanel Margin="0,12,0,14">
                             <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                                 <TextBlock Text="背景图" FontSize="13" VerticalAlignment="Center" />

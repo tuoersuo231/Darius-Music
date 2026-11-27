@@ -18,6 +18,8 @@
       <Grid x:Name="themeBackdrop" Grid.ColumnSpan="2" ClipToBounds="True" IsHitTestVisible="False">
         <Grid.Children>
           <Image x:Name="themeImage" Stretch="UniformToFill" HorizontalAlignment="Center" VerticalAlignment="Center" />
+          <!-- 背景暗度：铺一层黑，只压壁纸，不压频谱（频谱是后加进来的）。 -->
+          <Border x:Name="themeScrim" Background="#000000" Opacity="0" IsHitTestVisible="False" />
         </Grid.Children>
       </Grid>
       <!-- No border at all: the sidebar's 1 DIP border brush is now transparent, and a Border paints its
