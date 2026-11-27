@@ -371,6 +371,15 @@ public sealed class NowPlayingView : Grid
 
         _root.Children.Add(_backdrop);
         _root.Children.Add(_scrim);
+        // 频谱夹在背景和内容之间：只在 Layer=backdrop 时显示（overlay 模式下主页那个实例
+        // 本来就盖在播放页上面）。
+        var spectrum = new Controls.SpectrumView
+        {
+            VerticalAlignment = VerticalAlignment.Bottom,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            OnlyInBackdrop = true,
+        };
+        _root.Children.Add(spectrum);
         _root.Children.Add(_content);
         _root.Children.Add(_backButton);
         _root.Children.Add(_moreButton);

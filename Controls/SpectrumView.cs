@@ -33,6 +33,12 @@ public sealed class SpectrumView : FrameworkElement
     private bool _running;
     private DispatcherTimer? _timer;
 
+    /// <summary>
+    /// 只在 <c>Layer=backdrop</c> 时显示。播放页里那个实例用这个标记：
+    /// overlay 模式下主页根 Grid 上的实例本来就盖在播放页上面，再来一个就重了。
+    /// </summary>
+    public bool OnlyInBackdrop { get; set; }
+
     /// <summary>诊断用：回环抓了多少字节、画出来多大、当前最大值。</summary>
     public string DebugState
     {
@@ -80,10 +86,11 @@ public sealed class SpectrumView : FrameworkElement
     {
         var options = SpectrumOptions.Current;
         _options = options;
-        Visibility = options.Enabled ? Visibility.Visible : Visibility.Collapsed;
-        if (!options.Enabled) return;
-        double wanted = Math.Max(8, options.Height);
-        if (double.IsNaN(Height) || Math.Abs(Height - wanted) > 0.5) Height = wanted;
+        bool wanted = options.Enabled && (!OnlyInBackdrop || options.IsBackdrop);
+        Visibility = wanted ? Visibility.Visible : Visibility.Collapsed;
+        if (!wanted) return;
+        double targetHeight = Math.Max(8, options.Height);
+        if (double.IsNaN(Height) || Math.Abs(Height - targetHeight) > 0.5) Height = targetHeight;
         // 透明度不再交给控件级 Opacity：那样会连颜色一起和底色混（用户：颜色变了）。
         // 改成画的时候按 alpha 上色、颜色先反解，见 OnRender / Unmix。
         Opacity = 1;
