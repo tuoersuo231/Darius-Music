@@ -1254,4 +1254,354 @@ public static class AlignQa
         double vt = Math.Sqrt(pairs.Sum(p => (p.T - mt) * (p.T - mt)));
         return va > 0 && vt > 0 ? cov / (va * vt) : 0;
     }
+
+    /// <summary>B2 hybrid: SenseVoice CTC is the acoustic backbone, Whisper cross-attention is only a
+    /// per-character timing prior inside the same Viterbi. Prints pure-SV vs hybrid side by side.</summary>
+    public static void RunHybridAlign(string[] args)
+    {
+        var log = new List<string>();
+        try { RunHybridCore(args, log); }
+        catch (Exception ex) { log.Add("failed: " + ex.GetType().Name + " " + ex.Message); }
+        var report = Arg(args, "--report");
+        if (!string.IsNullOrEmpty(report))
+        {
+            var full = Path.GetFullPath(report);
+            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+            File.WriteAllLines(full, log, new UTF8Encoding(true));
+        }
+        Console.WriteLine(string.Join("\n", log));
+    }
+
+    private static void RunHybridCore(string[] args, List<string> log)
+    {
+        var lrcPath = Arg(args, "--lrc");
+        var audioPath = Arg(args, "--audio");
+        var wdir = Arg(args, "--whisper-dir") ?? Path.Combine(AppPaths.DataDir, "whisper");
+        int layer = int.TryParse(Arg(args, "--layer"), out var ly) ? ly : 7;
+        int head = int.TryParse(Arg(args, "--head"), out var hd) ? hd : 8;
+        double priorWeight = double.TryParse(Arg(args, "--prior-weight"), out var pw) ? pw : 1.0;
+        int limit = int.TryParse(Arg(args, "--limit"), out var l) ? l : int.MaxValue;
+        int skipFirst = int.TryParse(Arg(args, "--skip-first"), out var sf) ? sf : 3;
+        bool allowCpu = args.Contains("--allow-cpu");
+
+        if (lrcPath == null || !File.Exists(lrcPath)) { log.Add("missing --lrc"); return; }
+        if (audioPath == null || !File.Exists(audioPath)) { log.Add("missing --audio"); return; }
+
+        var modelPath = FindModel(args);
+        var tokensPath = FindTokens(args, modelPath);
+        if (modelPath == null || tokensPath == null) { log.Add("missing --model/--tokens"); return; }
+
+        var truth = LrcParser.Parse(File.ReadAllText(lrcPath, Encoding.UTF8));
+        if (truth == null) { log.Add("lrc parse failed"); return; }
+
+        var pcm = AudioDecode.LoadMono16k(audioPath);
+        log.Add($"audio={pcm.Length / 16000.0:0.0}s");
+
+        using var sv = SenseVoiceModel.Load(modelPath, tokensPath, 0, !allowCpu);
+        using var wh = WhisperAligner.Load(wdir, 0, !allowCpu, false);
+        log.Add($"sv lfr={sv.LfrM}/{sv.LfrN}  whisper L{layer}H{head} priorWeight={priorWeight}");
+
+        var tok = wh.Tokenizer;
+        var svRows = new List<Row>();
+        var hyRows = new List<Row>();
+        var bounds = new List<(int Index, long Start, long End)>();
+        var whRows = new List<Row>();
+        int ordinal = 0, lineIndex = 0, skipped = 0, misaligned = 0;
+        var totalWatch = System.Diagnostics.Stopwatch.StartNew();
+
+        foreach (var line in truth.Lines)
+        {
+            ordinal++;
+            if (!line.HasWordTiming || line.Words.Count < 2) { skipped++; continue; }
+            if (lineIndex >= limit) break;
+            if (line.StartMs < 0) { skipped++; continue; }
+            if (ordinal <= skipFirst) { skipped++; continue; }
+            if (line.Text.Contains('：') || line.Text.Contains(':') || line.Text.StartsWith("词") ||
+                line.Text.StartsWith("曲") || line.Text.StartsWith("编")) { skipped++; continue; }
+
+            // Use exactly the characters that become SenseVoice tokens (one per word, first char),
+            // otherwise the two character sequences drift apart and the prior lands on the wrong char.
+            var text = string.Concat(line.Words.Select(w => w.Text.Length > 0 ? w.Text[..1] : ""));
+            if (text.Length < 2) { skipped++; continue; }
+
+            long winStart = Math.Max(0, line.StartMs - 1500);
+            long winEnd = Math.Min((long)(pcm.Length / 16.0), line.EndMs + 1500);
+            if (winEnd - winStart > 29000) winEnd = winStart + 29000;
+            int s0 = (int)(winStart * 16);
+            int s1 = Math.Min(pcm.Length, (int)(winEnd * 16));
+            if (s1 - s0 < 3200) { skipped++; continue; }
+            var window = new float[s1 - s0];
+            Array.Copy(pcm, s0, window, 0, window.Length);
+
+            // ---- SenseVoice token ids (one per character) ----
+            var ids = new List<int>();
+            var kept = new List<(string Ch, long TruthStart)>();
+            foreach (var word in line.Words)
+            {
+                if (word.Text.Length == 0) continue;
+                int id = sv.IdForChar(word.Text[..1]);
+                if (id <= 0) continue;
+                ids.Add(id);
+                kept.Add((word.Text[..1], word.StartMs));
+            }
+            if (ids.Count < 2) { skipped++; continue; }
+
+            var cols = new List<int> { 0 };
+            cols.AddRange(ids);
+            var logits = sv.RunWindow(window, cols.ToArray(), out int frames);
+            if (frames == 0) { skipped++; continue; }
+            int nTok = ids.Count;
+            int colCount = nTok + 1;
+
+            var spansSv = ForceAlign.Align(logits, frames, colCount, 0, ids.ToArray());
+            if (spansSv.Length != nTok) { skipped++; continue; }
+
+            // ---- Whisper character attention ----
+            int melFrames = Math.Min(WhisperMel.FrameCount(window.Length), WhisperMel.ChunkFrames);
+            var mel = WhisperMel.Compute(window, melFrames);
+            var encoded = wh.Encode(WhisperMel.ToEncoderInput(mel, melFrames));
+            var pieces = tok.EncodeToPieces(text);
+            var wIds = tok.Encode(text);
+            var langId = tok.LanguageToken(GuessLang(text));
+            var seq = new List<int> { tok.StartOfTranscript };
+            if (langId > 0) seq.Add(langId);
+            seq.Add(tok.TranscribeToken);
+            seq.Add(tok.NoTimestampsToken);
+            int offset = seq.Count;
+            seq.AddRange(wIds);
+            seq.Add(tok.EndOfText);
+
+            float[] charAttn = Array.Empty<float>();
+            int nChar = 0;
+            if (wIds.Count > 1)
+            {
+                var flat = wh.Decode(encoded, seq.ToArray(), out var tTok);
+                var acc = WhisperAligner.ReduceHeads(flat, wh.NumLayers, wh.NumHeads, tTok,
+                    new[] { layer }, new[] { head });
+                var lex = new float[wIds.Count * WhisperAligner.EncFrames];
+                Array.Copy(acc, offset * WhisperAligner.EncFrames, lex, 0, lex.Length);
+                var built = WhisperDtw.BuildCharAttention(lex, wIds.Count, WhisperAligner.EncFrames,
+                    WhisperAligner.EncFrames, pieces);
+                charAttn = built.Attn;
+                nChar = built.Chars.Count;
+            }
+
+            // ---- resample whisper (20 ms) onto the SenseVoice frame grid (60 ms, 4 leading query frames) ----
+            float[]? prior = null;
+            bool hardPrior = args.Contains("--hard-prior");
+            if (nChar > 0 && hardPrior)
+            {
+                // Whisper's segmental-DP word boundaries, mapped onto the SenseVoice frame grid,
+                // used as a hard allowed range instead of a soft per-frame prior.
+                int wFrames = Math.Clamp(melFrames / 2 + 1, 1, WhisperAligner.EncFrames);
+                int loW = Math.Clamp((int)((line.StartMs - 100 - winStart) / WhisperAligner.FrameMs), 0, wFrames);
+                int hiW = Math.Clamp((int)((Math.Min(line.EndMs, line.Words[line.Words.Count - 1].StartMs + 500) - winStart) / WhisperAligner.FrameMs) + 1, 1, wFrames);
+                int avgW = Math.Max(1, (hiW - loW) / Math.Max(1, nChar));
+                var segs = WhisperDtw.AlignSegmental(charAttn, nChar, wFrames, WhisperAligner.EncFrames,
+                    loW, hiW, Math.Max(2, avgW / 3), Math.Max(4, avgW * 3));
+                prior = new float[nTok * frames];
+                for (int t = 0; t < frames; t++)
+                    for (int c = 0; c < nTok; c++) prior[c * frames + t] = -6f;
+                int useChar2 = Math.Min(nChar, nTok);
+                for (int c = 0; c < useChar2; c++)
+                {
+                    int a = segs[c].Start / 3 + 4;
+                    int b = segs[c].End / 3 + 4;
+                    for (int t = Math.Max(0, a); t <= Math.Min(frames - 1, b); t++) prior[c * frames + t] = 0f;
+                }
+            }
+            else if (nChar > 0)
+            {
+                prior = new float[nTok * frames];
+                int useChar = Math.Min(nChar, nTok);
+                if (nChar != nTok) misaligned++;
+                for (int t = 0; t < frames; t++)
+                {
+                    int wf = (t - 4) * 3;
+                    for (int c = 0; c < useChar; c++)
+                    {
+                        double a;
+                        if (wf < 0) a = charAttn[c * WhisperAligner.EncFrames + 0];
+                        else if (wf + 2 >= WhisperAligner.EncFrames)
+                            a = charAttn[c * WhisperAligner.EncFrames + WhisperAligner.EncFrames - 1];
+                        else
+                            a = (charAttn[c * WhisperAligner.EncFrames + wf]
+                                 + charAttn[c * WhisperAligner.EncFrames + wf + 1]
+                                 + charAttn[c * WhisperAligner.EncFrames + wf + 2]) / 3.0;
+                        if (a < 1e-8) a = 1e-8;
+                        prior[c * frames + t] = (float)Math.Log(a);
+                    }
+                    // characters beyond what whisper produced: flat prior
+                    for (int c = useChar; c < nTok; c++)
+                        prior[c * frames + t] = (float)Math.Log(1.0 / frames);
+                }
+            }
+
+            var spansHy = prior != null
+                ? ForceAlign.Align(logits, frames, colCount, 0, ids.ToArray(), prior, (float)priorWeight)
+                : spansSv;
+
+            double frameMs = 10.0 * sv.LfrN;
+            int n = Math.Min(kept.Count, spansSv.Length);
+            for (int i = 0; i < n; i++)
+            {
+                long a1 = winStart + (long)Math.Round((spansSv[i].StartFrame - 4) * frameMs);
+                svRows.Add(new Row
+                {
+                    LineIndex = lineIndex, Char = kept[i].Ch, TruthMs = kept[i].TruthStart,
+                    AlignMs = a1, ErrorMs = a1 - kept[i].TruthStart,
+                });
+                if (spansHy.Length == spansSv.Length)
+                {
+                    long a2 = winStart + (long)Math.Round((spansHy[i].StartFrame - 4) * frameMs);
+                    hyRows.Add(new Row
+                    {
+                        LineIndex = lineIndex, Char = kept[i].Ch, TruthMs = kept[i].TruthStart,
+                        AlignMs = a2, ErrorMs = a2 - kept[i].TruthStart,
+                    });
+                }
+            }
+            bounds.Add((lineIndex, line.StartMs, line.EndMs));
+            lineIndex++;
+        }
+        totalWatch.Stop();
+
+        if (svRows.Count == 0) { log.Add("no comparable lines"); return; }
+
+        void Report(string label, List<Row> rows)
+        {
+            if (rows.Count == 0) return;
+            var smooth = Median3ByLine(rows);
+            var fitted = FitToLines(rows, bounds);
+            log.Add($"--- {label} ---");
+            log.Add($"  raw      |error|: median={Median(rows.Select(r => (double)Math.Abs(r.ErrorMs)).ToList()):0}ms " +
+                    $"p90={Percentile(rows.Select(r => (double)Math.Abs(r.ErrorMs)).ToList(), 90):0}ms " +
+                    $"gapCorr={GapCorrelation(rows):0.000}");
+            log.Add($"  median-3 |error|: median={Median(smooth.Select(r => (double)Math.Abs(r.ErrorMs)).ToList()):0}ms " +
+                    $"p90={Percentile(smooth.Select(r => (double)Math.Abs(r.ErrorMs)).ToList(), 90):0}ms " +
+                    $"gapCorr={GapCorrelation(smooth):0.000}");
+            log.Add($"  fit-line |error|: median={Median(fitted.Select(r => (double)Math.Abs(r.ErrorMs)).ToList()):0}ms " +
+                    $"p90={Percentile(fitted.Select(r => (double)Math.Abs(r.ErrorMs)).ToList(), 90):0}ms " +
+                    $"gapCorr={GapCorrelation(fitted):0.000}");
+        }
+
+        log.Add("");
+        log.Add($"lines={lineIndex} chars={svRows.Count} skipped={skipped} misalignedChars={misaligned} " +
+                $"total={totalWatch.ElapsedMilliseconds}ms");
+        Report("SenseVoice only (CTC)", svRows);
+        Report($"Hybrid (CTC + whisper prior w={priorWeight})", hyRows);
+        log.Add("");
+        log.Add("per-line median error (first 15):");
+        foreach (var group in svRows.GroupBy(r => r.LineIndex).OrderBy(g => g.Key).Take(15))
+        {
+            double m1 = Median(group.Select(r => (double)r.ErrorMs).ToList());
+            var hy = hyRows.Where(r => r.LineIndex == group.Key).ToList();
+            double m2 = hy.Count > 0 ? Median(hy.Select(r => (double)r.ErrorMs).ToList()) : 0;
+            log.Add($"  line {group.Key,2} n={group.Count(),2} sv={m1,6:+0;-0;0} hybrid={m2,6:+0;-0;0}");
+        }
+    }
+
+    /// <summary>3-point median filter on the per-line character start times (the same smoothing the
+    /// product path uses before writing the cache).</summary>
+    private static List<Row> Median3ByLine(List<Row> rows)
+    {
+        var result = new List<Row>(rows.Count);
+        foreach (var group in rows.GroupBy(r => r.LineIndex))
+        {
+            var list = group.ToList();
+            int n = list.Count;
+            var times = new long[n];
+            for (int i = 0; i < n; i++)
+            {
+                if (i == 0 || i == n - 1) times[i] = list[i].AlignMs;
+                else
+                {
+                    long a = list[i - 1].AlignMs, b = list[i].AlignMs, c = list[i + 1].AlignMs;
+                    long mid = Math.Max(Math.Min(a, b), Math.Min(Math.Max(a, b), c));
+                    times[i] = mid;
+                }
+            }
+            for (int i = 0; i < n; i++)
+            {
+                var r = list[i];
+                result.Add(new Row
+                {
+                    LineIndex = r.LineIndex, Char = r.Char, TruthMs = r.TruthMs,
+                    AlignMs = times[i], ErrorMs = times[i] - r.TruthMs,
+                });
+            }
+        }
+        return result;
+    }
+
+    /// <summary>Stretch each line's aligned character times so the line spans exactly
+    /// [line.StartMs, line.EndMs] - the step the product path (LocalAlign.FitToLine) does before
+    /// writing the cache. It leaves within-line correlation alone but fixes the line-level scale,
+    /// which is what the pooled gap correlation is sensitive to.</summary>
+    /// <summary>Exactly the product post-processing (LocalAlign.FitToLine): lead 40 ms, median-3,
+    /// enforce 50 ms spacing, then only compress/shift when the line overruns. No stretching, so the
+    /// absolute timing stays where the model put it.</summary>
+    private static List<Row> FitToLines(List<Row> rows, List<(int Index, long Start, long End)> bounds)
+    {
+        var result = new List<Row>(rows.Count);
+        foreach (var group in rows.GroupBy(r => r.LineIndex))
+        {
+            var list = group.ToList();
+            var b = bounds.FirstOrDefault(x => x.Index == group.Key);
+            int n = list.Count;
+            if (n == 0) { continue; }
+            var times = new long[n];
+            for (int i = 0; i < n; i++) times[i] = list[i].AlignMs;
+
+            for (int i = 0; i < n; i++) times[i] -= 40;
+            if (n >= 5)
+            {
+                var copy = (long[])times.Clone();
+                for (int i = 1; i < n - 1; i++)
+                {
+                    long a = copy[i - 1], bb = copy[i], c = copy[i + 1];
+                    long mid = Math.Max(Math.Min(a, bb), Math.Min(Math.Max(a, bb), c));
+                    times[i] = mid;
+                }
+            }
+            for (int i = 1; i < n; i++)
+                if (times[i] < times[i - 1] + 50) times[i] = times[i - 1] + 50;
+
+            long start = b.Start;
+            long avg = n > 1 ? Math.Max(120, Math.Min(400, (times[n - 1] - times[0]) / (n - 1))) : 300;
+            long limit = Math.Max(start + 200, b.End) - avg - 60;
+            long span = times[n - 1] - times[0];
+            long room = limit - start;
+            if (times[n - 1] > limit && span > 0 && room > 0)
+            {
+                long shift = limit - times[n - 1];
+                if (times[0] + shift >= start)
+                {
+                    for (int i = 0; i < n; i++) times[i] += shift;
+                }
+                else
+                {
+                    double scale = (double)room / span;
+                    for (int i = 0; i < n; i++) times[i] = start + (long)Math.Round((times[i] - times[0]) * scale);
+                }
+            }
+            if (times[0] < start)
+            {
+                long shift = start - times[0];
+                for (int i = 0; i < n; i++) times[i] += shift;
+            }
+
+            for (int i = 0; i < n; i++)
+            {
+                var r = list[i];
+                result.Add(new Row
+                {
+                    LineIndex = r.LineIndex, Char = r.Char, TruthMs = r.TruthMs,
+                    AlignMs = times[i], ErrorMs = times[i] - r.TruthMs,
+                });
+            }
+        }
+        return result;
+    }
+
 }

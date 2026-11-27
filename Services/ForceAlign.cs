@@ -17,7 +17,18 @@ public static class ForceAlign
     /// <summary>logits: 行优先 [frames, cols]；blankCol 是 blank 的列；tokenIds 是这行 token 的真实 id，
     /// 它们按顺序放在 1..N 列（0 列留给 blank）。返回每个 token 的帧区间；不可达时返回空数组。</summary>
     public static Span[] Align(float[] logits, int frames, int cols, int blankCol, int[] tokenIds)
+        => Align(logits, frames, cols, blankCol, tokenIds, null, 0f);
+
+    /// <summary>
+    /// Same Viterbi, but a per-token timing prior (log-probability, [nTok * frames]) is added to the
+    /// token emissions. Used by the B2 hybrid: the CTC logits stay the backbone, Whisper's
+    /// cross-attention only nudges where each character is allowed to sit.
+    /// </summary>
+    public static Span[] Align(float[] logits, int frames, int cols, int blankCol, int[] tokenIds,
+        float[]? prior, float priorWeight)
     {
+        bool usePrior = prior != null && priorWeight != 0f;
+
         int n = tokenIds.Length;
         if (n == 0 || frames <= 0) return Array.Empty<Span>();
 
@@ -40,6 +51,11 @@ public static class ForceAlign
             for (int s = 0; s < states; s++)
             {
                 float emission = (s % 2 == 0) ? logits[row + blankCol] : logits[row + (s + 1) / 2];
+                if (usePrior && s % 2 == 1)
+                {
+                    int token = (s - 1) / 2;
+                    emission += priorWeight * prior![token * frames + t];
+                }
 
                 float best = prev[s];
                 int from = s;

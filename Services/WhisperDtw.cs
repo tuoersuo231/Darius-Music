@@ -184,6 +184,52 @@ public static class WhisperDtw
     }
 
     /// <summary>
+    /// Character-level attention: merge the byte-level tokens that make up one character and
+    /// normalize each row. Returns the row-major matrix [nChar * stride] plus the characters.
+    /// </summary>
+    public static (float[] Attn, List<string> Chars) BuildCharAttention(float[] attn, int nTok, int nFrames,
+        int stride, IReadOnlyList<string> pieces)
+    {
+        var groups = new List<List<int>>();
+        var pending = new List<int>();
+        for (int i = 0; i < pieces.Count && i < nTok; i++)
+        {
+            pending.Add(i);
+            if (pieces[i].Length == 0) continue;
+            groups.Add(new List<int>(pending));
+            pending.Clear();
+        }
+        if (pending.Count > 0)
+        {
+            if (groups.Count == 0) groups.Add(new List<int>(pending));
+            else groups[^1].AddRange(pending);
+        }
+
+        var chars = new List<string>();
+        var matrix = new float[groups.Count * stride];
+        for (int c = 0; c < groups.Count; c++)
+        {
+            var list = groups[c];
+            var sb = new System.Text.StringBuilder();
+            foreach (var t in list) if (t < pieces.Count) sb.Append(pieces[t]);
+            chars.Add(sb.ToString());
+
+            float sum = 0f;
+            for (int f = 0; f < nFrames; f++)
+            {
+                float acc = 0f;
+                foreach (var t in list) acc += attn[t * stride + f];
+                acc /= list.Count;
+                matrix[c * stride + f] = acc;
+                sum += acc;
+            }
+            if (sum > 0)
+                for (int f = 0; f < nFrames; f++) matrix[c * stride + f] /= sum;
+        }
+        return (matrix, chars);
+    }
+
+    /// <summary>
     /// Map token ranges onto characters. A CJK char may be split across several byte-level
     /// tokens (the extra tokens decode to empty text), so those are merged into the character
     /// that completes them.

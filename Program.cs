@@ -534,6 +534,11 @@ public static class Program
             Services.AlignQa.RunCompareCache(args);
             return;
         }
+        if (args.Contains("--hybrid-align"))
+        {
+            Services.AlignQa.RunHybridAlign(args);
+            return;
+        }
         if (args.Contains("--whisper-align"))
         {
             Services.AlignQa.RunWhisperAlign(args);
