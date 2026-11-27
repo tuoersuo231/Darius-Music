@@ -1,0 +1,20 @@
+{
+  "scripts": [
+    {
+      "Id": "6ee20a7ef492bc9be52ef71fbeae7f623b6bd023f333a16df0ac5cc10722c7a1",
+      "Name": "念心音源",
+      "Version": "1.0.1",
+      "Author": "念心小站",
+      "Description": "音源更新，关注微信公众号: 念心小站",
+      "File": "6ee20a7ef492bc9b.js",
+      "Platforms": {
+        "kg": [ "128k", "320k", "flac" ],
+        "tx": [ "128k", "320k", "flac" ],
+        "wy": [ "128k", "320k", "flac" ],
+        "kw": [ "128k", "320k", "flac" ],
+        "mg": [ "128k", "320k", "flac" ]
+      },
+      "Error": null
+    }
+  ]
+}

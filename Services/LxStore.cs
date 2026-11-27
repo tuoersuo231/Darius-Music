@@ -118,9 +118,115 @@ public static class LxStore
         Save();
     }
 
-    /// <summary>Imports one script file; returns the entry, or throws with a readable reason.</summary>
-    public static LxEntry Import(string path)
+    /// <summary>
+    /// 安装包里自带的落雪脚本：启动时把它装进 <c>data\lx</c>，这样一台干净机器装完就有音源，
+    /// 不会出现「网易云说无版权、别的电脑却能放」。
+    ///
+    /// 用<b>随包的清单</b>而不是当场跑一遍脚本：脚本要联网自检（超时 3 s），放启动路径会拖慢开机。
+    /// 只有在文件缺失/内容变了（脚本升级）时才写盘，其余时候只是一次读文件 + 一次比较。
+    /// 不覆盖用户自己导入的同类脚本：同名不同 id 的旧版会被顶掉，并把「当前选中」跟过去。
+    /// </summary>
+    public static int SeedBundled()
     {
+        Load();
+        try
+        {
+            var bundledDir = Path.Combine(AppContext.BaseDirectory, "Assets", "lx");
+            var manifest = Path.Combine(bundledDir, "bundled.json");
+            if (!File.Exists(manifest)) return 0;
+            var list = JsonNode.Parse(File.ReadAllText(manifest))?["scripts"] as JsonArray;
+            if (list == null) return 0;
+
+            int added = 0;
+            bool dirty = false;
+            Directory.CreateDirectory(Dir);
+            foreach (var node in list)
+            {
+                var preset = node?.Deserialize<LxEntry>(Json);
+                if (preset == null || preset.Id.Length == 0 || preset.File.Length == 0) continue;
+                var source = Path.Combine(bundledDir, preset.File);
+                if (!File.Exists(source)) continue;
+
+                var target = Path.Combine(Dir, preset.File);
+                bool changed = false;
+                try
+                {
+                    var bytes = File.ReadAllBytes(source);
+                    var existing = File.Exists(target) ? File.ReadAllBytes(target) : null;
+                    if (existing == null || existing.Length != bytes.Length ||
+                        !existing.AsSpan().SequenceEqual(bytes))
+                    {
+                        File.WriteAllBytes(target, bytes);
+                        changed = true;
+                    }
+                }
+                catch
+                {
+                    continue;
+                }
+
+                // 同名不同 id＝脚本升级：把旧版从列表里换掉，选中状态继续跟到新版。
+                bool wasActive = ActiveId == preset.Id;
+                var stale = Entries.FirstOrDefault(e => e.Id != preset.Id && e.Name == preset.Name);
+                if (stale != null)
+                {
+                    if (ActiveId == stale.Id) wasActive = true;
+                    Entries.Remove(stale);
+                    try
+                    {
+                        var old = Path.Combine(Dir, stale.File);
+                        if (File.Exists(old)) File.Delete(old);
+                    }
+                    catch { }
+                    dirty = true;
+                }
+
+                var entry = Entries.FirstOrDefault(e => e.Id == preset.Id);
+                if (entry == null)
+                {
+                    Entries.Add(preset);
+                    added++;
+                    dirty = true;
+                }
+                else
+                {
+                    // 元数据以随包清单为准，Error 保持用户自己那次探测的结果。
+                    entry.Name = preset.Name;
+                    entry.Version = preset.Version;
+                    entry.Author = preset.Author;
+                    entry.Description = preset.Description;
+                    entry.File = preset.File;
+                    entry.Platforms = preset.Platforms;
+                    dirty = true;
+                }
+
+                if (ActiveId.Length == 0 || wasActive) ActiveId = preset.Id;
+                if (changed || added > 0)
+                    LogSeed($"{preset.Name} {preset.Version} -> {preset.File} changed={changed}");
+            }
+            if (dirty) Save();
+            return added;
+        }
+        catch (Exception ex)
+        {
+            LogSeed("seed failed: " + ex.GetType().Name + " " + ex.Message);
+            return 0;
+        }
+    }
+
+    private static void LogSeed(string text)
+    {
+        try
+        {
+            Directory.CreateDirectory(Dir);
+            File.AppendAllText(Path.Combine(Dir, "seed.log"),
+                $"{DateTime.Now:MM-dd HH:mm:ss} {text}{Environment.NewLine}");
+        }
+        catch { }
+    }
+
+    /// <summary>Imports one script file; returns the entry, or throws with a readable reason.</summary>
+    public static LxEntry Import(string path)    {
         Load();
         var script = File.ReadAllText(path);
         var info = ReadHeader(script);

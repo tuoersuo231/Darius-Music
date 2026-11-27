@@ -74,6 +74,10 @@ public static class Program
 
         var settings = SettingsStore.Load();
 
+        // 随包的落雪音源：干净的机器装完就有，否则网易云一句「无版权或需要会员」就没后备了。
+        // 只在文件缺失/脚本升级时写盘，不碰用户自己导入的同名旧版之外的东西。
+        try { Services.LxStore.SeedBundled(); } catch { }
+
         // 游戏（尤其带反作弊的）几乎都以管理员权限运行。UIPI 规定：低权限进程在「高权限窗口位于前台」
         // 时既收不到 RegisterHotKey 的 WM_HOTKEY，低级键盘钩子也不会被调用 —— 也就是「普通应用里能按、
         // 游戏里按不动」。用户在快捷键页打开开关后，这里用启动器提权重开一次，然后本进程退出。
