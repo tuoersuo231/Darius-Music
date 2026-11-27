@@ -2408,6 +2408,11 @@ public static class Program
             RunRightMenu(app, args, settings);
             return;
         }
+        if (args.Contains("--resume-window-qa"))
+        {
+            RunResumeWindowQa(app, args, settings);
+            return;
+        }
         if (args.Contains("--resume-qa"))
         {
             // QA：验证「上次听到哪」的恢复链路 —— 装载但不播放，进度条位置要对上。
@@ -3261,6 +3266,57 @@ public static class Program
         }
 
         File.WriteAllLines(Path.Combine(dir, "f11qa.txt"), lines);
+        win.Close();
+        app.Shutdown();
+    }
+
+    /// <summary>QA: 走真实主窗口的恢复路径（含进度条回填），再按播放，看媒体真的开始走了没有。</summary>
+    private static void RunResumeWindowQa(Application app, string[] args, AppSettings settings)
+    {
+        string dir = Arg(args, "--resume-window-qa") ?? "resume-window";
+        Directory.CreateDirectory(dir);
+        var lines = new List<string>();
+        lines.Add($"resume: path='{settings.ResumeSongPath}' pos={settings.ResumePositionMs:0}");
+        var ctl = new PlayerController(settings);
+        var win = new MainWindow(ctl)
+        {
+            WindowStartupLocation = WindowStartupLocation.Manual,
+            Left = 60,
+            Top = 60,
+            Width = 1180,
+            Height = 760,
+        };
+        win.Show();
+        win.Activate();
+        bool early = args.Contains("--play-early");
+        if (early)
+        {
+            // 媒体一打开就按播放：这时「恢复进度」的 180~540 ms 还没走完（以前它会把用户刚放起来的
+            // 播放又暂停掉）。
+            int waited = 0;
+            while (waited < 12000 && !ctl.Playback.IsOpened)
+            {
+                PumpFrames(25);
+                waited += 25;
+            }
+            lines.Add($"opened after {waited} ms: " + ctl.Playback.DebugLoad);
+            ctl.Toggle();
+            for (int i = 0; i < 15; i++) PumpFrames(100);
+        }
+        else
+        {
+            for (int i = 0; i < 45; i++) PumpFrames(100);     // OnLoaded → 载库 → TryRestoreLastSession
+            lines.Add("after restore: " + ctl.Playback.DebugLoad);
+            lines.Add("         ui:   " + win.DebugProgress);
+            ctl.Toggle();                                     // 播放键
+            for (int i = 0; i < 15; i++) PumpFrames(100);
+        }
+        lines.Add("after play:    " + ctl.Playback.DebugLoad);
+        lines.Add("         ui:   " + win.DebugProgress);
+        for (int i = 0; i < 10; i++) PumpFrames(100);
+        lines.Add("1s later:      " + ctl.Playback.DebugLoad);
+        lines.Add("         ui:   " + win.DebugProgress);
+        File.WriteAllLines(Path.Combine(dir, "resume-window.txt"), lines);
         win.Close();
         app.Shutdown();
     }

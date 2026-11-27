@@ -272,7 +272,12 @@ public partial class MainWindow : Window
             if (song == null) return;
             _player.PrepareResume(song, _settings.ResumePositionMs);
             var seconds = Math.Clamp(_settings.ResumePositionMs / 1000.0, 0, Math.Max(0, sldProgress.Maximum));
-            sldProgress.Value = seconds;
+            // 这一步只是把进度条摆到上次的位置，不能当成用户拖动：以前它触发 OnProgressChanged →
+            // Seek()，而此时媒体还是「打开但没播过」的暂停态，Position 会被静默忽略（seek.log 里
+            // took=False），锚点又被改回 0 —— 用户看到的就是「恢复后进度条是 0:00、按播放没反应」。
+            _restoringResume = true;
+            try { sldProgress.Value = seconds; }
+            finally { _restoringResume = false; }
             txtPos.Text = TimeSpan.FromSeconds(seconds).ToString(seconds >= 3600 ? @"h\:mm\:ss" : @"m\:ss");
         }
         catch { }
@@ -434,6 +439,11 @@ public partial class MainWindow : Window
 
     /// <summary>QA (--key-qa): registration state plus every action that actually fired, so a hotkey
     /// that is bound but silent can be told apart from one that never reaches the app.</summary>
+    /// <summary>QA: 进度条与播放器对不上时用这个看（恢复进度那个 bug）。</summary>
+    public string DebugProgress =>
+        $"slider={sldProgress.Value:0.0}s max={sldProgress.Maximum:0.0}s raw={_player.RawPositionMs:0}ms " +
+        $"playing={_player.PlaybackState} seeking={_seeking}";
+
     public string DebugHotkeys =>
         $"registered={_hotkeys.RegisteredCount} failed={_hotkeys.Failed.Count} {_hotkeys.HookState} " +
         $"hwnd={_hotkeys.Handle} hookCalls={_hotkeys.HookCalls} msgs=[{string.Join(";", _hotkeys.MessageLog.TakeLast(4))}] " +
@@ -2168,6 +2178,9 @@ public partial class MainWindow : Window
 
     private bool _seeking;
 
+    /// <summary>正在把「上次听到哪」回填到进度条：这段时间里的 Value 变化不是用户操作，不能触发 seek。</summary>
+    private bool _restoringResume;
+
     /// <summary>拖动进度条：过程中不 seek（媒体管线会被打崩），松手才跳一次。</summary>
     private void EndSeek()
     {
@@ -2182,6 +2195,7 @@ public partial class MainWindow : Window
     /// <summary>松手时已经 seek 过一次，Value 还会再报一次变化，这里要挡掉，否则一次点击跳两下。</summary>
     private void OnProgressChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
+        if (_restoringResume) return;
         if (_seeking || sldProgress.IsMouseCaptureWithin) return;
         if ((DateTime.UtcNow - _lastSeekUtc).TotalMilliseconds < 600) return;
         if (Math.Abs(_player.RawPositionMs / 1000.0 - e.NewValue) > 1.2)

@@ -96,6 +96,9 @@ public sealed class PlaybackService : IDisposable
 
     public bool IsPlaying => _playing;
 
+    /// <summary>媒体是否已经打开（MediaOpened 已触发）。QA 用它在「恢复进度」的窗口期按播放。</summary>
+    public bool IsOpened => _opened;
+
     public double DurationMs
     {
         get
@@ -124,18 +127,28 @@ public sealed class PlaybackService : IDisposable
 
     private double _pendingSeekMs;
     private bool _pendingPlay;
+    private bool _priming;
 
-    /// <summary>
-    /// MediaPlayer 在「打开后从没播放过」的暂停态里会**静默忽略** Position 赋值（实测 session 一直是 0）。
-    /// 所以恢复进度要这样跳：先把音量压到 0、播一帧、再写 Position、立刻暂停、最后把音量放回去 ——
-    /// 用户听不到任何声音，看到的却是上次那个位置。
-    /// </summary>
+    /// <summary>「恢复进度」用过的定位方式，现在也给 SeekTo 用：先播一帧再写 Position。</summary>
     private void ApplyPendingSeek()
     {
         if (_pendingSeekMs <= 0) return;
         double target = _pendingSeekMs;
         _pendingSeekMs = 0;
+        PrimeAndSeek(target);
+    }
+
+    /// <summary>
+    /// MediaPlayer 在「打开后从没播放过」的暂停态里会**静默忽略** Position 赋值（实测 session 一直是 0）。
+    /// 所以恢复进度要这样跳：先把音量压到 0、播一帧、再写 Position、立刻暂停、最后把音量放回去 ——
+    /// 用户听不到任何声音，看到的却是上次那个位置。
+    /// 注意：这 200~500 ms 里用户如果按了播放，绝不能再把他暂停掉（那正是「点了播放没反应/播一下就停」）。
+    /// </summary>
+    private void PrimeAndSeek(double target)
+    {
+        if (target <= 0) return;
         double volume = _player.Volume;
+        _priming = true;
         try { _player.Volume = 0; _player.Play(); } catch { }
         int attempts = 0;
         var timer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(180) };
@@ -147,17 +160,107 @@ public sealed class PlaybackService : IDisposable
             if (Math.Abs(now - target) < 1200 || ++attempts >= 3)
             {
                 timer.Stop();
-                try { _player.Pause(); } catch { }
-                _playing = false;
+                _priming = false;
+                bool userPressedPlay = _playing;
+                try { if (!userPressedPlay) _player.Pause(); } catch { }
                 _anchorMs = target;
                 _watch.Restart();
                 try { _player.Volume = volume; } catch { }
+                LogPlay($"prime seek target={target:0} after={now:0} attempts={attempts} userPlaying={userPressedPlay}");
+                if (!userPressedPlay) _playing = false;
                 StateChanged?.Invoke();
                 return;
             }
             try { _player.PlaybackSession.Position = TimeSpan.FromMilliseconds(target); } catch { }
         };
         timer.Start();
+    }
+
+    /// <summary>
+    /// Play() 之后回读真实状态。MediaPlayer 在「刚打开还在缓冲」时被 Play→Pause 过（恢复进度就是这么做的），
+    /// 之后的 Play() 会被静默忽略 —— 用户看到的就是「点了播放没反应」。这里依次补两下：
+    /// 先在当前位置重写一次 Position 再 Play（把管线踢醒），还不行就重开一次 Source 并回到锚点。
+    /// </summary>
+    private void ArmPlayWatchdog()
+    {
+        _playWatch?.Stop();
+        _playWatch = new System.Windows.Threading.DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromMilliseconds(400),
+        };
+        _playWatch.Tick += (_, _) =>
+        {
+            _playWatch!.Stop();
+            if (_disposed) return;
+            Windows.Media.Playback.MediaPlaybackState state;
+            try { state = _player.PlaybackSession.PlaybackState; }
+            catch { return; }
+            if (state == Windows.Media.Playback.MediaPlaybackState.Playing)
+            {
+                if (!_playing) { _playing = true; StateChanged?.Invoke(); }
+                return;
+            }
+            // 还在打开/缓冲：先别动它，再等一轮（最多等三轮 ≈1.2 s，之后当卡住处理）。
+            if ((state is Windows.Media.Playback.MediaPlaybackState.Opening or
+                 Windows.Media.Playback.MediaPlaybackState.Buffering) && _playWaits < 3)
+            {
+                _playWaits++;
+                ArmPlayWatchdog();
+                return;
+            }
+            if (!_playing) return;              // 用户并没有要求播放，别自作主张
+            if (_playNudges == 0)
+            {
+                _playNudges = 1;
+                PlayNudges++;
+                LogPlay($"nudge state={state} pos={_anchorMs:0}");
+                try { _player.PlaybackSession.Position = TimeSpan.FromMilliseconds(Math.Max(0, _anchorMs)); } catch { }
+                try { _player.Play(); } catch { }
+                ArmPlayWatchdog();
+                return;
+            }
+            if (_playNudges == 1)
+            {
+                _playNudges = 2;
+                PlayRestarts++;
+                LogPlay($"restart state={state} pos={_anchorMs:0}");
+                try
+                {
+                    if (_pendingUri != null)
+                    {
+                        _pendingSeekMs = Math.Max(0, _anchorMs);
+                        _pendingPlay = true;
+                        _opened = false;
+                        _player.Source = MediaSource.CreateFromUri(_pendingUri);
+                        _player.Play();
+                        ArmOpenWatchdog();
+                    }
+                }
+                catch (Exception ex) { LogPlay("restart failed " + ex.GetType().Name); }
+                ArmPlayWatchdog();
+            }
+        };
+        _playWatch.Start();
+    }
+
+    private DispatcherTimer? _playWatch;
+    private int _playNudges;
+    private int _playWaits;
+
+    /// <summary>QA: Play() 被 MediaPlayer 忽略后补救过几次。</summary>
+    public int PlayNudges { get; private set; }
+    public int PlayRestarts { get; private set; }
+
+    private void LogPlay(string text)
+    {
+        try
+        {
+            var path = System.IO.Path.Combine(AppPaths.DataDir, "play.log");
+            var info = new System.IO.FileInfo(path);
+            if (info.Exists && info.Length > 512 * 1024) info.Delete();
+            System.IO.File.AppendAllText(path, $"{DateTime.Now:HH:mm:ss.fff} {text}{Environment.NewLine}");
+        }
+        catch { }
     }
 
     /// <summary>QA: 装载/跳转的中间状态，用来判断「恢复进度」到底卡在哪一步。</summary>
@@ -168,17 +271,26 @@ public sealed class PlaybackService : IDisposable
             string session = "?";
             try { session = $"session={_player.PlaybackSession.Position.TotalMilliseconds:0} state={_player.PlaybackSession.PlaybackState}"; }
             catch (Exception ex) { session = "session-err " + ex.GetType().Name; }
-            return $"opened={_opened} playing={_playing} anchor={_anchorMs:0} pending={_pendingSeekMs:0} {session}";
+            return $"opened={_opened} playing={_playing} priming={_priming} anchor={_anchorMs:0} " +
+                   $"pending={_pendingSeekMs:0} nudges={PlayNudges} restarts={PlayRestarts} {session}";
         }
     }
 
+    private string SafeSession()
+    {
+        try { return $"state={_player.PlaybackSession.PlaybackState} pos={_player.PlaybackSession.Position.TotalMilliseconds:0}"; }
+        catch { return "state=?"; }
+    }
+
     /// <summary>想跳到某个位置，但媒体可能还没打开：排队到 MediaOpened 里再执行。
-    /// 用于「上次听到一半」的恢复 —— 装载但不自动播放，位置照样在。</summary>
+    /// 用于「上次听到一半」的恢复 —— 装载但不自动播放，位置照样在。
+    /// 已经打开过也走同一套「播一帧再定位」：直接写 Position 在「暂停且从没播过」的状态下会被忽略
+    /// （实测 seek.log 里 took=False），进度条于是回到 0:00。</summary>
     public void SeekTo(double ms)
     {
         if (ms <= 50) return;
-        _pendingSeekMs = ms;
-        if (_opened) { _pendingSeekMs = 0; Seek(ms); }
+        if (_opened) { _pendingSeekMs = 0; PrimeAndSeek(ms); }
+        else _pendingSeekMs = ms;
     }
 
     /// <summary>Opens a stream URL or a local file and starts buffering/playing.</summary>
@@ -257,6 +369,8 @@ public sealed class PlaybackService : IDisposable
     /// <summary>Silences the current track immediately.</summary>
     public void Stop()
     {
+        _playWatch?.Stop();
+        _playNudges = 0;
         // Pause only — clearing Source here and immediately assigning the next one in Open() is the
         // race that left the following track at 0:00 with no sound. Open() replaces the source anyway,
         // and a paused player is silent, so the audible result is the same.
@@ -271,6 +385,7 @@ public sealed class PlaybackService : IDisposable
     public void Play()
     {
         if (Current == null) return;
+        LogPlay($"Play() opened={_opened} playing={_playing} priming={_priming} anchor={_anchorMs:0} {SafeSession()}");
         // 恢复的会话只装载不播放：如果这一步因为任何原因没打开成功（或 Source 被清掉），
         // 直接 Play() 会毫无反应（用户报的「播放键按了没动静」）。这里补一次装载，开好再播。
         if (!_opened)
@@ -285,10 +400,16 @@ public sealed class PlaybackService : IDisposable
         _playing = true;
         _watch.Restart();
         StateChanged?.Invoke();
+        _playNudges = 0;
+        _playWaits = 0;
+        ArmPlayWatchdog();
     }
 
     public void Pause()
     {
+        _playWatch?.Stop();
+        _playNudges = 0;
+        _playWaits = 0;
         _player.Pause();
         _anchorMs = PositionMs;
         _playing = false;
