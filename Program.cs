@@ -484,7 +484,21 @@ public static class Program
             RunLyricProbe(args, settings);
             return;
         }
-        if (args.Contains("--chrome-qa"))
+        if (args.Contains("--word-qa"))
+        {
+            RunWordQa(args, settings);
+            return;
+        }
+        if (args.Contains("--online-lyric-qa"))
+        {
+            RunOnlineLyricQa(args, settings);
+            return;
+        }
+        if (args.Contains("--qrc-dec"))
+        {
+            RunQrcDecode(args);
+            return;
+        }        if (args.Contains("--chrome-qa"))
         {
             RunChromeQa(app, args, settings);
             return;
@@ -3437,6 +3451,257 @@ public static class Program
                                   $"last@{(withWords.Words[^1].StartMs):0} estimated={withWords.WordsEstimated}");
                 }
             }
+        }
+        catch (Exception ex)
+        {
+            lines.Add("failed: " + ex.GetType().Name + " " + ex.Message);
+        }
+        File.WriteAllLines(report, lines);
+        Console.WriteLine(string.Join("\n", lines));
+    }
+
+    /// <summary>
+    /// QA: 第二歌词源（腾讯 QRC）到底能不能补上逐字。对每首歌打印网易云有没有词级时间、
+    /// QRC 命中哪一首、解出多少字节、每行几个字、以及两家行时间的整体偏移（--word-qa "歌名"）。
+    /// </summary>
+    private static void RunWordQa(string[] args, AppSettings settings)
+    {
+        string query = Arg(args, "--word-qa") ?? "夜曲";
+        string report = Arg(args, "--report") ?? "word-qa.txt";
+        var lines = new List<string> { $"query={query}" };
+        try
+        {
+            Services.NeteaseApi.Cookie = settings.NeteaseCookie;
+            Services.NeteaseApi.Quality = settings.NeteaseQuality;
+            var page = Services.NeteaseApi.SearchAsync(query, 3).GetAwaiter().GetResult();
+            lines.Add($"netease results={page.Songs.Count}");
+            foreach (var song in page.Songs.Take(3))
+            {
+                var text = Services.NeteaseApi.LyricAsync(song.NeteaseId).GetAwaiter().GetResult() ?? "";
+                var netease = Services.LrcParser.Parse(text);
+                lines.Add($"netease id={song.NeteaseId} '{song.DisplayTitle}' - '{song.DisplayArtist}' " +
+                          $"{text.Length}B lines={netease.Lines.Count} " +
+                          $"hasWordTiming={Services.LrcParser.HasWordTiming(netease)}");
+
+                var payload = Services.QqLyric.Fetch(song.DisplayTitle, song.DisplayArtist,
+                    (int)song.Duration.TotalSeconds, netease);
+                if (payload == null)
+                {
+                    lines.Add("   qq: no match");
+                    continue;
+                }
+                lines.Add($"   qq hit='{payload.Hit.Name}' - '{payload.Hit.Singer}' id={payload.Hit.Id} " +
+                          $"interval={payload.Hit.Interval} lyric={payload.Lyric.Length}B " +
+                          $"translation={payload.Translation.Length}B");
+                var doc = payload.Doc;
+                if (doc == null)
+                {
+                    lines.Add("   qq: rejected");
+                    continue;
+                }
+                int timed = doc.Lines.Count(l => l.Words.Count > 0);
+                int translated = doc.Lines.Count(l => l.Translation.Length > 0);
+                lines.Add($"   qq doc lines={doc.Lines.Count} withWords={timed} translations={translated} " +
+                          $"hasWordTiming={Services.LrcParser.HasWordTiming(doc)} " +
+                          $"overlap={Services.QqLyric.LineOverlap(doc, netease):0.00}");
+                if (payload.Translation.Length > 0 && translated == 0)
+                {
+                    var transHead = payload.Translation.Split('\n').Take(2).Select(l => l.Trim());
+                    lines.Add("   translation not attached; head=" + string.Join(" | ", transHead));
+                }
+
+                // 同一句的时间差：按文本配对，比按序号配对可靠得多。中位数大就说明两家的音频不同源。
+                static string Key(string text) =>
+                    new(text.Where(c => !char.IsWhiteSpace(c) && !char.IsPunctuation(c) && !char.IsSymbol(c)).ToArray());
+                static string FormatLine(Models.LyricLine line) =>
+                    $"[{line.StartMs,7}-{line.EndMs,7}] w={line.Words.Count,3} '{line.Text}'" +
+                    (line.Translation.Length > 0 ? " | " + line.Translation : "") +
+                    (line.Words.Count > 0 ? $"  first={line.Words[0].StartMs} est={line.WordsEstimated}" : "");
+                var deltas = new List<long>();
+                foreach (var line in doc.Lines)
+                {
+                    var key = Key(line.Text);
+                    if (key.Length < 4) continue;
+                    var match = netease.Lines.FirstOrDefault(n => Key(n.Text) == key);
+                    if (match != null) deltas.Add(line.StartMs - match.StartMs);
+                }
+                if (deltas.Count > 0)
+                {
+                    var sorted = deltas.OrderBy(d => d).ToList();
+                    int within = deltas.Count(d => Math.Abs(d) <= 120);
+                    lines.Add($"   timing median={sorted[sorted.Count / 2]}ms min={sorted[0]} max={sorted[^1]} " +
+                              $"textPairs={deltas.Count} within120={within}");
+                }
+                lines.Add($"   shift estimate={Services.QqLyric.Estimate(doc, netease)}");
+
+                // 网易云自己就有词级时间时（yrc），拿它当基准：两家逐字时间差多少，才知道要不要平移。
+                if (Services.LrcParser.HasWordTiming(netease))
+                {
+                    var wordDeltas = new List<long>();
+                    foreach (var line in doc.Lines.Where(l => l.Words.Count > 1))
+                    {
+                        var key = Key(line.Text);
+                        if (key.Length < 4) continue;
+                        var match = netease.Lines.FirstOrDefault(n => n.Words.Count > 1 && Key(n.Text) == key);
+                        if (match == null) continue;
+                        wordDeltas.Add(line.Words[0].StartMs - match.Words[0].StartMs);
+                    }
+                    if (wordDeltas.Count > 0)
+                    {
+                        var sorted = wordDeltas.OrderBy(d => d).ToList();
+                        lines.Add($"   word-timing vs yrc median={sorted[sorted.Count / 2]}ms " +
+                                  $"pairs={wordDeltas.Count} within60={wordDeltas.Count(d => Math.Abs(d) <= 60)}");
+                    }
+                }
+                if (Arg(args, "--dump") != null)
+                {
+                    File.WriteAllText(report + ".qq.lrc", string.Join("\n", doc.Lines.Select(FormatLine)));
+                    File.WriteAllText(report + ".wy.lrc", string.Join("\n", netease.Lines.Select(FormatLine)));
+                }
+                var sample = doc.Lines.FirstOrDefault(l => l.Words.Count > 2);
+                if (sample != null)
+                {
+                    lines.Add($"   sample [{sample.StartMs}-{sample.EndMs}] '{sample.Text}'");
+                    lines.Add("   words: " + string.Join(" ", sample.Words.Take(6)
+                        .Select(w => $"{w.Text}@{w.StartMs}-{w.EndMs}")));
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            lines.Add("failed: " + ex.GetType().Name + " " + ex.Message);
+        }
+        File.WriteAllLines(report, lines);
+        Console.WriteLine(string.Join("\n", lines));
+    }
+
+    /// <summary>QA: 走完整的歌词链（网易云 → 第二源补词级 → 缓存），看最终文档是不是逐字的。
+    /// 用 --online-lyric-qa "歌名" --report 文件。</summary>
+    private static void RunOnlineLyricQa(string[] args, AppSettings settings)
+    {
+        string query = Arg(args, "--online-lyric-qa") ?? "夜曲 周杰伦";
+        string report = Arg(args, "--report") ?? "online-lyric-qa.txt";
+        var lines = new List<string> { $"query={query}" };
+        try
+        {
+            Services.NeteaseApi.Cookie = settings.NeteaseCookie;
+            Services.NeteaseApi.Quality = settings.NeteaseQuality;
+            var page = Services.NeteaseApi.SearchAsync(query, 3).GetAwaiter().GetResult();
+            lines.Add($"results={page.Songs.Count}");
+            var song = page.Songs.FirstOrDefault();
+            if (song == null)
+            {
+                lines.Add("no song");
+                File.WriteAllLines(report, lines);
+                Console.WriteLine(string.Join("\n", lines));
+                return;
+            }
+            lines.Add($"song id={song.NeteaseId} '{song.DisplayTitle}' - '{song.DisplayArtist}' " +
+                      $"dur={(int)song.Duration.TotalSeconds}s");
+            var ctl = new Services.PlayerController(settings);
+            foreach (var pass in new[] { "first", "again" })
+            {
+                var watch = System.Diagnostics.Stopwatch.StartNew();
+                var doc = Task.Run(() => ctl.DebugLoadLyrics(song)).GetAwaiter().GetResult();
+                watch.Stop();
+                if (doc == null)
+                {
+                    lines.Add($"{pass}: lyrics=null ({watch.ElapsedMilliseconds}ms)");
+                    continue;
+                }
+                var timed = doc.Lines.Where(l => l.Words.Count > 0).ToList();
+                int real = timed.Count(l => !l.WordsEstimated);
+                lines.Add($"{pass}: {watch.ElapsedMilliseconds}ms lines={doc.Lines.Count} " +
+                          $"withWords={timed.Count} realWordTiming={real} " +
+                          $"translations={doc.Lines.Count(l => l.Translation.Length > 0)} " +
+                          $"hasWordTiming={Services.LrcParser.HasWordTiming(doc)}");
+                if (pass != "first") continue;
+                if (Arg(args, "--dump-lrc") is string dumpPath)
+                {
+                    File.WriteAllText(dumpPath, ToA2Lrc(doc));
+                    lines.Add($"   dumped {dumpPath} {new System.IO.FileInfo(dumpPath).Length}B");
+                }
+                var durations = timed.SelectMany(l => l.Words).Select(w => w.EndMs - w.StartMs).ToList();
+                if (durations.Count > 2)
+                {
+                    double mean = durations.Average();
+                    double variance = durations.Average(d => (d - mean) * (d - mean));
+                    lines.Add($"   word durations n={durations.Count} min={durations.Min()} max={durations.Max()} " +
+                              $"mean={mean:0.0} stdev={Math.Sqrt(variance):0.0} " +
+                              $"distinct={durations.Distinct().Count()}");
+                }
+                foreach (var line in timed.Skip(1).Take(2))
+                {
+                    lines.Add($"   [{line.StartMs}] '{line.Text}'");
+                    lines.Add("   " + string.Join(" ", line.Words.Take(8)
+                        .Select(w => $"{w.Text}@{w.StartMs}-{w.EndMs}")));
+                }
+                if (!Services.LrcParser.HasWordTiming(doc))
+                {
+                    var probe = Services.QqLyric.Fetch(song.DisplayTitle, song.DisplayArtist,
+                        (int)song.Duration.TotalSeconds);
+                    lines.Add(probe == null
+                        ? "   qq probe: no hit"
+                        : $"   qq probe: '{probe.Hit.Name}' - '{probe.Hit.Singer}' {probe.Hit.Interval} " +
+                          $"lyric={probe.Lyric.Length}B lines={probe.Lyric.Split('\n').Length}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            lines.Add("failed: " + ex.GetType().Name + " " + ex.Message);
+        }
+        File.WriteAllLines(report, lines);
+        Console.WriteLine(string.Join("\n", lines));
+    }
+
+    /// <summary>Writes a document back out in the A2 form the renderer reads ("[mm:ss.xxx]&lt;ts&gt;word…"),
+    /// so the visual QA modes can screenshot <em>the document the player actually produced</em>.</summary>
+    private static string ToA2Lrc(Models.LyricDocument doc)
+    {
+        var builder = new System.Text.StringBuilder();
+        foreach (var line in doc.Lines)
+        {
+            if (line.Words.Count == 0 || line.WordsEstimated)
+            {
+                builder.AppendLine($"[{Time(line.StartMs)}]{line.Text}");
+                continue;
+            }
+            builder.Append($"[{Time(line.StartMs)}]");
+            foreach (var word in line.Words) builder.Append($"<{Time(word.StartMs)}>{word.Text}");
+            builder.AppendLine();
+            if (line.Translation.Length > 0) builder.AppendLine($"[{Time(line.StartMs)}]{line.Translation}");
+        }
+        return builder.ToString();
+
+        static string Time(long ms) => $"{(ms / 60000):00}:{(ms / 1000 % 60):00}.{ms % 1000:000}";
+    }
+
+    /// <summary>QA: QRC 解码器单独跑一遍（--qrc-dec 音乐id / --qrc-dec file:hex文件）。</summary>
+    private static void RunQrcDecode(string[] args)
+    {
+        string report = Arg(args, "--report") ?? "qrc-dec.txt";
+        var lines = new List<string>();
+        try
+        {
+            string arg = Arg(args, "--qrc-dec") ?? "718477";
+            var xml = arg.StartsWith("file:", StringComparison.Ordinal)
+                ? new Dictionary<string, string>()
+                : Services.QqLyric.LyricXml(long.Parse(arg));
+            string hex = arg.StartsWith("file:", StringComparison.Ordinal)
+                ? File.ReadAllText(arg[5..]).Trim()
+                : xml.GetValueOrDefault("content", "");
+            lines.Add($"input={arg} hex={hex.Length}B tags=[{string.Join(",", xml.Keys)}]");
+            var raw = Services.QrcCodec.Decrypt(hex);
+            lines.Add($"raw={raw.Length}B head={Convert.ToHexString(raw, 0, Math.Min(8, raw.Length))}");
+            var text = Services.QrcCodec.Decode(hex);
+            File.WriteAllText(report + ".lyric.txt", text);
+            lines.Add($"decoded={text.Length}B lines={text.Split('\n').Length}");
+            lines.Add("head=" + text.Substring(0, Math.Min(240, text.Length)).Replace("\n", "\\n"));
+            var doc = Services.QqLyric.Build(text, "");
+            lines.Add(doc == null
+                ? "build=null"
+                : $"build lines={doc.Lines.Count} withWords={doc.Lines.Count(l => l.Words.Count > 0)}");
         }
         catch (Exception ex)
         {

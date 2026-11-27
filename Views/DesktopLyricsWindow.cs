@@ -819,6 +819,13 @@ public sealed class DesktopLyricsWindow : Window
     /// <summary>Called when the lyric document arrives after the track started.</summary>
     public void RefreshLyrics()
     {
+        // The word-level upgrade lands on a background thread, so hop back to the UI thread first,
+        // the way NowPlayingView does — SetDocument touches live visual state.
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(new Action(RefreshLyrics));
+            return;
+        }
         _stack.SetDocument(_player.Lyrics, (long)Math.Max(0, _player.PositionMs));
         UpdateMetaVisibility();
     }

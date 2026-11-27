@@ -292,7 +292,7 @@ public sealed class PlayerController : IDisposable
         int generation = BeginView();
         IsOnlineView = true;
         OnlineKeyword = keyword;
-        _activePlaylist = null;
+        _activePlaylist = null;
         ActivePlaylistName = "";
         Busy = true;
         ViewName = "在线搜索";
@@ -502,7 +502,7 @@ public sealed class PlayerController : IDisposable
     private async Task ShowFilesAsync(IReadOnlyList<string> files, bool keepList)
     {
         int generation = BeginView();
-        _activePlaylist = null;
+        _activePlaylist = null;
         ActivePlaylistName = "";
         Busy = true;
         ViewName = "本地音乐";
@@ -536,7 +536,7 @@ public sealed class PlayerController : IDisposable
     {
         if (string.IsNullOrWhiteSpace(folder) || !System.IO.Directory.Exists(folder)) return;
         int generation = BeginView();
-        _activePlaylist = null;
+        _activePlaylist = null;
         ActivePlaylistName = "";
         Busy = true;
         ViewSubtitle = "正在扫描本地文件夹 …";
@@ -948,7 +948,7 @@ public sealed class PlayerController : IDisposable
         long cloudId = song.NeteaseId > 0 ? song.NeteaseId : GuessNeteaseIdFromPath(song.Path);
         if (cloudId > 0 && !LrcParser.HasWordTiming(local))
         {
-            var online = await LoadOnlineLyricsAsync(cloudId).ConfigureAwait(false);
+            var online = await LoadOnlineLyricsAsync(song, cloudId).ConfigureAwait(false);
             // The id may have been guessed from the file name, so never let a wrong guess replace real
             // lyrics with another song's text: only take the online document when the visible text
             // agrees, or when there is no local text to lose.
@@ -964,26 +964,50 @@ public sealed class PlayerController : IDisposable
 
     /// <summary>NeteaseDownload names saved tracks `"title - artist [id].ext"`; recover that id so a
     /// downloaded track can still ask for the word-level lyric it was downloaded without.</summary>
-    /// <summary>Cheap identity check between a local sidecar and a fetched document.</summary>
+    /// <summary>Cheap identity check between a local sidecar and a fetched document. Compares whole
+    /// lines rather than a prefix: the second lyric source may start with a different title card, so a
+    /// prefix test would throw away perfectly good word timing.</summary>
     internal static bool SameSong(LyricDocument? local, LyricDocument? online)
     {
-        var a = FirstSungText(local);
-        var b = FirstSungText(online);
-        if (a.Length == 0 || b.Length == 0) return true;
-        int n = Math.Min(12, Math.Min(a.Length, b.Length));
-        return string.CompareOrdinal(a, 0, b, 0, n) == 0;
+        if (local == null || online == null) return true;
+        var a = LongLines(local);
+        var b = LongLines(online);
+        if (a.Count == 0 || b.Count == 0) return true;
+        int shared = a.Count(b.Contains);
+        int needed = Math.Max(1, Math.Min(a.Count, b.Count) / 5);
+        return shared >= needed;
     }
 
-    private static string FirstSungText(LyricDocument? doc)
+    private static HashSet<string> LongLines(LyricDocument doc)
     {
-        if (doc == null) return "";
+        var set = new HashSet<string>(StringComparer.Ordinal);
         foreach (var line in doc.Lines)
         {
             var text = new string(line.Text.Where(c => !char.IsWhiteSpace(c) && !char.IsPunctuation(c) && !char.IsSymbol(c)).ToArray());
-            if (text.Length >= 4) return text;
+            if (text.Length >= 4) set.Add(text);
         }
-        return "";
+        return set;
     }
+
+    /// <summary>QA hook: run the lyric chain for one cloud row exactly as playback would, off the UI
+    /// thread (the chain awaits, so calling it on the dispatcher would deadlock). The word-level
+    /// upgrade runs in the background in normal use, so the hook waits for it to keep QA deterministic.</summary>
+    internal LyricDocument? DebugLoadLyrics(Song song)
+    {
+        _waitForWordLevel = true;
+        try
+        {
+            Current = song;
+            LoadLyricsAsync(song).GetAwaiter().GetResult();
+            return Lyrics;
+        }
+        finally
+        {
+            _waitForWordLevel = false;
+        }
+    }
+
+    private bool _waitForWordLevel;
 
     internal static long GuessNeteaseIdFromPath(string path)
     {
@@ -996,24 +1020,28 @@ public sealed class PlayerController : IDisposable
         return long.TryParse(digits, out var id) ? id : 0;
     }
 
-    /// <summary>Fetches a cloud track's lyrics once, then keeps them next to the app's data so replays
+    /// <summary>
+    /// Fetches a cloud track's lyrics once, then keeps them next to the app's data so replays
     /// and downloads reuse the same text instead of asking the network again. `<id>.v2` marks a cache
     /// written by the word-level-aware request; caches without it are re-fetched once, so songs
-    /// downloaded before that change stop sweeping at a constant rate.</summary>
-    private async Task<LyricDocument?> LoadOnlineLyricsAsync(long cloudId)
+    /// downloaded before that change stop sweeping at a constant rate.
+    ///
+    /// 网易云只有一部分歌带 <c>yrc</c>（词级），其余以前只能整句均分。现在当它没给词级时间时，
+    /// 用第二源（腾讯 QRC）补一份真正的逐字时间；拿到就写 <c>&lt;id&gt;.qrc</c>，下次播放直接读盘。
+    /// </summary>
+    private async Task<LyricDocument?> LoadOnlineLyricsAsync(Song song, long cloudId)
     {
         var file = Path.Combine(AppPaths.DataDir, "lyrics", cloudId + ".lrc");
         var marker = Path.Combine(AppPaths.DataDir, "lyrics", cloudId + ".v2");
-        bool upgraded = File.Exists(marker);
-        try
-        {
-            if (File.Exists(file))
-            {
-                var cached = LrcParser.Parse(File.ReadAllText(file));
-                if (cached.Lines.Count > 0 && (upgraded || LrcParser.HasWordTiming(cached))) return cached;
-            }
-        }
-        catch { }
+        // 第二源「已经问过」的记号：没有它的歌才会去联网，避免每次播放都多一次搜索。
+        var secondSource = Path.Combine(AppPaths.DataDir, "lyrics", cloudId + ".qsb");
+        LyricDocument? cached = TryReadLyric(file);
+
+        // 第二源的词级缓存最优先：命中连网易云都不用问。
+        var wordLevel = QqLyric.TryCached(cloudId, cached);
+        if (wordLevel != null) return wordLevel;
+        if (cached is { Lines.Count: > 0 } && (cached.HasWordTiming || IsFresh(secondSource, 30)))
+            return cached;
 
         string? text = null;
         try { text = await Task.Run(() => NeteaseApi.LyricAsync(cloudId)).ConfigureAwait(false); }
@@ -1021,17 +1049,11 @@ public sealed class PlayerController : IDisposable
         if (string.IsNullOrWhiteSpace(text))
         {
             // Keep whatever cache we already had instead of losing the lyrics to a network hiccup.
-            try
-            {
-                if (File.Exists(file))
-                {
-                    var cached = LrcParser.Parse(File.ReadAllText(file));
-                    if (cached.Lines.Count > 0) return cached;
-                }
-            }
-            catch { }
+            if (cached is { Lines.Count: > 0 }) return cached;
             return null;
         }
+
+        var doc = LrcParser.Parse(text);
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(file)!);
@@ -1039,7 +1061,73 @@ public sealed class PlayerController : IDisposable
             File.WriteAllText(marker, "word-level request v2");
         }
         catch { }
-        return LrcParser.Parse(text);
+
+        if (!LrcParser.HasWordTiming(doc))
+        {
+            Touch(secondSource);
+            int seconds = (int)song.Duration.TotalSeconds;
+            if (_waitForWordLevel)
+            {
+                LyricDocument? upgraded;
+                try
+                {
+                    upgraded = await QqLyric
+                        .EnsureAsync(cloudId, song.DisplayTitle, song.DisplayArtist, doc, seconds)
+                        .ConfigureAwait(false);
+                }
+                catch { upgraded = null; }
+                if (upgraded != null) return upgraded;
+            }
+            else
+            {
+                // Show the NetEase text now, swap in the word-level one when it arrives: waiting for
+                // Tencent here would delay the lyrics by a second or two on every first play.
+                _ = UpgradeToWordLevelAsync(cloudId, song, doc, seconds);
+            }
+        }
+        return doc;
+    }
+
+    private async Task UpgradeToWordLevelAsync(long cloudId, Song song, LyricDocument baseDoc, int seconds)
+    {
+        try
+        {
+            var doc = await QqLyric
+                .EnsureAsync(cloudId, song.DisplayTitle, song.DisplayArtist, baseDoc, seconds,
+                    TimeSpan.FromSeconds(20))
+                .ConfigureAwait(false);
+            if (doc == null || !ReferenceEquals(Current, song)) return;
+            Lyrics = LrcParser.WithOpeningCard(doc, song.DisplayTitle, song.DisplayArtist, song.Album);
+            LyricsChanged?.Invoke();
+        }
+        catch { }
+    }
+
+    private static LyricDocument? TryReadLyric(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return null;
+            var doc = LrcParser.Parse(File.ReadAllText(path));
+            return doc.Lines.Count > 0 ? doc : null;
+        }
+        catch { return null; }
+    }
+
+    private static bool IsFresh(string path, double days)
+    {
+        try { return File.Exists(path) && (DateTime.UtcNow - File.GetLastWriteTimeUtc(path)).TotalDays < days; }
+        catch { return false; }
+    }
+
+    private static void Touch(string path)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, DateTime.UtcNow.ToString("o"));
+        }
+        catch { }
     }
 
         public PlayMode Mode => Settings.PlayMode;
