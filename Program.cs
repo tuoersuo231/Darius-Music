@@ -2924,14 +2924,43 @@ public static class Program
 
             var watch = System.Diagnostics.Stopwatch.StartNew();
             Models.LyricDocument? baseDoc = null;
-            try
+            // --no-base：不拿网易云那份当护栏，直接问源。用来区分"源里没有这首歌"和
+            // "源里有、但被 AgreesWith 的文字/时间护栏拒了"。
+            if (!args.Contains("--no-base"))
             {
-                var text = Task.Run(() => Services.NeteaseApi.LyricAsync(id)).GetAwaiter().GetResult();
-                if (!string.IsNullOrWhiteSpace(text)) baseDoc = Services.LrcParser.Parse(text);
+                try
+                {
+                    var text = Task.Run(() => Services.NeteaseApi.LyricAsync(id)).GetAwaiter().GetResult();
+                    if (!string.IsNullOrWhiteSpace(text)) baseDoc = Services.LrcParser.Parse(text);
+                }
+                catch { }
             }
-            catch { }
             lines.Add($"  {"netease",-8} lines={baseDoc?.Lines.Count ?? 0} " +
                       $"wordLines={baseDoc?.Lines.Count(l => l.HasWordTiming) ?? 0} ({watch.ElapsedMilliseconds}ms)");
+
+            void Report(string name, Models.LyricDocument? document, long elapsed)
+            {
+                if (document == null)
+                {
+                    lines.Add($"  {name,-8} - ({elapsed}ms)");
+                    return;
+                }
+                int wordLines = document.Lines.Count(l => l.HasWordTiming);
+                int words = document.Lines.Sum(l => l.Words.Count);
+                lines.Add($"  {name,-8} + lines={document.Lines.Count} wordLines={wordLines} " +
+                          $"words={words} ({elapsed}ms)");
+                // --dump-text <prefix>：把这一级拿到的行文本写出去，用来对比两边的断句/字形差异。
+                if (Arg(args, "--dump-text") is not string dumpPrefix) return;
+                try
+                {
+                    File.WriteAllLines(dumpPrefix + "." + name,
+                        document.Lines.Select(l => l.Text), System.Text.Encoding.UTF8);
+                    if (baseDoc != null)
+                        File.WriteAllLines(dumpPrefix + ".base",
+                            baseDoc.Lines.Select(l => l.Text), System.Text.Encoding.UTF8);
+                }
+                catch { }
+            }
 
             long mark = watch.ElapsedMilliseconds;
             var doc = TryCall(() => Services.AmllLyrics.EnsureAsync(id, baseDoc, TimeSpan.FromSeconds(10)));
@@ -2956,20 +2985,6 @@ public static class Program
             Report("lrclib", doc, watch.ElapsedMilliseconds - mark);
         }
         File.WriteAllLines(Arg(args, "--report") ?? "wordlevel-test.txt", lines);
-        return;
-
-        void Report(string name, Models.LyricDocument? document, long elapsed)
-        {
-            if (document == null)
-            {
-                lines.Add($"  {name,-8} - ({elapsed}ms)");
-                return;
-            }
-            int wordLines = document.Lines.Count(l => l.HasWordTiming);
-            int words = document.Lines.Sum(l => l.Words.Count);
-            lines.Add($"  {name,-8} + lines={document.Lines.Count} wordLines={wordLines} " +
-                      $"words={words} ({elapsed}ms)");
-        }
     }
 
     private static Models.LyricDocument? TryCall(Func<Task<Models.LyricDocument?>> call)

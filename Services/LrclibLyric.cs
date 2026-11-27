@@ -560,53 +560,12 @@ public static class LrclibLyric
     // ---------- identity guard ----------
 
     /// <summary>
+    /// 和 <see cref="QqLyric.AgreesWith"/> 同一套判定（先比整行，过不了再退到二元组覆盖率）。
     /// LRCLIB 和网易云几乎从不按同一处断句：网易云是「あの日見渡した渚を／今も思い出すんだ」两行，
-    /// LRCLIB 合成一行。行级重合（<see cref="QqLyric.AgreesWith"/> 的口径）于是恒为 0，
-    /// 一首完全正确的逐字歌词会被当成「另一首歌」扔掉 —— 实测《打上花火》就是这么被拒的。
-    /// 所以这里先用行级判断（快、且对同平台候选最准），过不了再用<b>二元组覆盖率</b>兜底：
-    /// 断句不同但字相同，覆盖率仍然很高；换了语言的版本覆盖率会掉到很低。
+    /// LRCLIB 合成一行，只比整行的话会把一份完全正确的逐字歌词当成「另一首歌」扔掉。
     /// </summary>
-    private static bool AgreesWith(LyricDocument candidate, LyricDocument? baseDoc)
-    {
-        if (baseDoc == null) return true;
-        if (QqLyric.AgreesWith(candidate, baseDoc)) return true;
-        return BigramCoverage(candidate, baseDoc) >= 0.35;
-    }
-
-    /// <summary>候选文本的二字组有多大比例也出现在网易云那份里（0..1）。</summary>
-    private static double BigramCoverage(LyricDocument candidate, LyricDocument baseDoc)
-    {
-        var mine = Bigrams(candidate);
-        if (mine.Count == 0) return 1;
-        var theirs = Bigrams(baseDoc);
-        if (theirs.Count == 0) return 1;
-        int shared = 0;
-        foreach (var key in mine) if (theirs.Contains(key)) shared++;
-        return shared / (double)mine.Count;
-    }
-
-    private static HashSet<string> Bigrams(LyricDocument doc)
-    {
-        var set = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var line in doc.Lines)
-        {
-            var text = Squash(line.Text);
-            for (int i = 0; i + 1 < text.Length; i++) set.Add(text.Substring(i, 2));
-        }
-        return set;
-    }
-
-    /// <summary>去掉空白与标点、统一小写：断句差异基本都出在空格和标点上。</summary>
-    private static string Squash(string text)
-    {
-        var builder = new StringBuilder(text.Length);
-        foreach (var c in text)
-        {
-            if (char.IsWhiteSpace(c) || char.IsPunctuation(c) || char.IsSymbol(c)) continue;
-            builder.Append(char.ToLowerInvariant(c));
-        }
-        return builder.ToString();
-    }
+    private static bool AgreesWith(LyricDocument candidate, LyricDocument? baseDoc) =>
+        QqLyric.AgreesWith(candidate, baseDoc);
 
     // ---------- title / artist cleanup ----------
 

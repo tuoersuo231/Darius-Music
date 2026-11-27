@@ -331,7 +331,48 @@ public static class QqLyric
         if (overlap < 0) return true;                 // nothing to compare against
         if (overlap >= 0.75) return true;             // clearly the same words
         var shift = Estimate(candidate, baseDoc);
-        return overlap >= 0.35 && shift.Pairs >= 8 && shift.Iqr <= 450;
+        if (overlap >= 0.35 && shift.Pairs >= 8 && shift.Iqr <= 450) return true;
+        // 断句不同的时候行级重合会接近 0：网易云把「今天我 寒夜里看雪飘过」合成一行，酷狗拆成两行，
+        // 整行文本一个都对不上 —— 一份完全正确的逐字歌词被当成"另一首歌"扔了（实测《海阔天空》
+        // 酷狗 46 行 349 个逐字节点就是这么丢的）。退回二字组覆盖率：字一样、断句不同仍然很高。
+        return BigramCoverage(candidate, baseDoc) >= 0.35;
+    }
+
+    /// <summary>候选文本的二字组有多大比例也出现在 <paramref name="baseDoc"/> 里（0..1）。
+    /// 与逐行比对互补：只看"用了哪些字/词的组合"，不关心在哪里断句。</summary>
+    internal static double BigramCoverage(LyricDocument candidate, LyricDocument? baseDoc)
+    {
+        if (baseDoc == null) return 1;
+        var mine = Bigrams(candidate);
+        if (mine.Count == 0) return 1;
+        var theirs = Bigrams(baseDoc);
+        if (theirs.Count == 0) return 1;
+        int shared = 0;
+        foreach (var key in mine) if (theirs.Contains(key)) shared++;
+        return shared / (double)mine.Count;
+    }
+
+    private static HashSet<string> Bigrams(LyricDocument doc)
+    {
+        var set = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var line in doc.Lines)
+        {
+            var text = Squash(line.Text);
+            for (int i = 0; i + 1 < text.Length; i++) set.Add(text.Substring(i, 2));
+        }
+        return set;
+    }
+
+    /// <summary>去掉空白与标点、统一小写：断句差异基本都出在空格和标点上。</summary>
+    private static string Squash(string text)
+    {
+        var builder = new System.Text.StringBuilder(text.Length);
+        foreach (var c in text)
+        {
+            if (char.IsWhiteSpace(c) || char.IsPunctuation(c) || char.IsSymbol(c)) continue;
+            builder.Append(char.ToLowerInvariant(c));
+        }
+        return builder.ToString();
     }
 
     public static List<Hit> Search(string keyword, int limit)
