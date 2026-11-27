@@ -52,6 +52,10 @@ public sealed class SpectrumService : IDisposable
 
     private readonly List<Tap> _taps = new();
     private Tap? _active;
+    private ProcessLoopbackCapture? _process;
+    private bool _ownOnly;
+    private bool _requestedOwnOnly;
+    private string _processError = "";
     private WaveFormat? _format;
     private double _sampleRate = 48000;
     private long _frames;
@@ -63,9 +67,16 @@ public sealed class SpectrumService : IDisposable
     /// <summary>条数（= 数组长度）。设置里改过 Bars 之后由 <see cref="Configure"/> 重新分配。</summary>
     public int BarCount { get { lock (_gate) return _bars; } }
 
-    public bool Running { get { lock (_gate) return _taps.Count > 0; } }
+    public bool Running { get { lock (_gate) return _taps.Count > 0 || _process != null; } }
     /// <summary>诊断用：正在喂数据的那块输出设备叫什么。</summary>
-    public string ActiveDevice { get { lock (_gate) return _active?.Name ?? "-"; } }
+    public string ActiveDevice
+    {
+        get
+        {
+            lock (_gate)
+                return _process != null ? "本程序（进程回环）" : _active?.Name ?? "-";
+        }
+    }
 
     /// <summary>诊断用：每块被监听的声卡和它最近的能量。</summary>
     public string TapDiagnostics
@@ -73,12 +84,17 @@ public sealed class SpectrumService : IDisposable
         get
         {
             lock (_gate)
-                return _taps.Count == 0
+            {
+                if (_process != null)
+                    return _process.Running ? "process-loopback=ok" : "process-loopback=" + _process.Error;
+                var prefix = _processError.Length > 0 ? "process=ERR:" + _processError + " | " : "";
+                return prefix + (_taps.Count == 0
                     ? "none"
                     : string.Join(" | ", _taps.Select(t =>
                         t.Error.Length > 0
                             ? $"{t.Name}=ERR:{t.Error}"
-                            : $"{t.Name}={t.Energy:0.0000}/peak={MasterPeak(t):0.0000}/nz={t.NonZero}/{Fmt(t)}"));
+                            : $"{t.Name}={t.Energy:0.0000}/peak={MasterPeak(t):0.0000}/nz={t.NonZero}/{Fmt(t)}")));
+            }
         }
     }
     public long BytesCaptured { get { lock (_gate) return _bytes; } }
@@ -106,9 +122,12 @@ public sealed class SpectrumService : IDisposable
     /// <summary>把 settings.json 里那份参数装进来。条数变了会重建缓冲。</summary>
     public void Configure(SpectrumSettings options)
     {
+        bool modeChanged;
         lock (_gate)
         {
             _options = options;
+            modeChanged = _requestedOwnOnly != options.OwnAudioOnly;
+            _requestedOwnOnly = options.OwnAudioOnly;
             _bars = Math.Clamp(options.Bars, 4, 128);
             // 镜像模式下左右两半共用一个频段数组：N 根柱子只对应 (N+1)/2 个频段。
             // 以前这里按 N 建频段，结果镜像时只画得到 600~2200 Hz，右半边的频段永远没被读出来。
@@ -122,6 +141,12 @@ public sealed class SpectrumService : IDisposable
             RebuildBoost();
             RebuildRanges();
             UpdateDecay();
+        }
+        // 换"只抓本程序"和"抓整块声卡"必须重开一路回环，放到锁外面做，别在持锁时 join 后台线程。
+        if (modeChanged && (_taps.Count > 0 || _process != null))
+        {
+            Stop();
+            Start();
         }
     }
 
@@ -151,7 +176,32 @@ public sealed class SpectrumService : IDisposable
     {
         lock (_gate)
         {
-            if (_taps.Count > 0 || !_options.Enabled) return;
+            if (_taps.Count > 0 || _process != null || !_options.Enabled) return;
+            // 只要本程序自己的声音：用进程回环；拿不到就退回设备回环（至少还能动）。
+            if (_options.OwnAudioOnly)
+            {
+                var process = new ProcessLoopbackCapture();
+                process.Data += OnProcessData;
+                if (process.Start(Environment.ProcessId))
+                {
+                    _process = process;
+                    _ownOnly = true;
+                    _processError = "";
+                    if (process.Format != null)
+                    {
+                        _format = process.Format;
+                        _sampleRate = process.Format.SampleRate;
+                        RebuildRanges();
+                        UpdateDecay();
+                    }
+                    return;
+                }
+                // 失败原因留给诊断；然后照常走设备回环。
+                _processError = process.Error;
+                process.Data -= OnProcessData;
+                process.Dispose();
+                _ownOnly = false;
+            }
             var taps = new List<Tap>();
             try
             {
@@ -197,16 +247,36 @@ public sealed class SpectrumService : IDisposable
     public void Stop()
     {
         List<Tap> taps;
+        ProcessLoopbackCapture? process;
         lock (_gate)
         {
             taps = new List<Tap>(_taps);
             _taps.Clear();
             _active = null;
+            process = _process;
+            _process = null;
+        }
+        if (process != null)
+        {
+            process.Data -= OnProcessData;
+            try { process.Dispose(); } catch { }
         }
         foreach (var tap in taps)
         {
             try { tap.Capture.StopRecording(); } catch { }
             try { tap.Capture.Dispose(); } catch { }
+        }
+    }
+
+    /// <summary>进程回环送来的 PCM（在它自己的后台线程上）。</summary>
+    private void OnProcessData(byte[] buffer, int count)
+    {
+        lock (_gate)
+        {
+            var format = _format;
+            if (format == null || count <= 0) return;
+            _bytes += count;
+            Ingest(buffer, count, format);
         }
     }
 
@@ -248,31 +318,36 @@ public sealed class SpectrumService : IDisposable
                 _pending.Clear();   // 换设备就别把两边的采样拼在一起
             }
             if (tap != _active) return;
-
-            int channels = Math.Max(1, format.Channels);
-            bool isFloat = format.Encoding == WaveFormatEncoding.IeeeFloat;
-            int bytesPerSample = isFloat ? 4 : Math.Max(1, format.BitsPerSample / 8);
-            int stride = bytesPerSample * channels;
-            if (stride <= 0) return;
-
-            for (int offset = 0; offset + stride <= e.BytesRecorded; offset += stride)
-            {
-                float value = 0;
-                for (int c = 0; c < channels; c++)
-                    value += ReadSample(e.Buffer, offset + c * bytesPerSample, isFloat);
-                _pending.Add(value / channels);
-            }
-
-            int consumed = 0;
-            while (_pending.Count - consumed >= FftSize)
-            {
-                Analyse(consumed);
-                consumed += FftSize / 2;   // 50% overlap，和皮肤一致
-            }
-            if (consumed > 0) _pending.RemoveRange(0, consumed);
-            // 攒得太多说明没人来取（比如 UI 被关掉了），别让它无限长大。
-            if (_pending.Count > FftSize * 8) _pending.RemoveRange(0, _pending.Count - FftSize * 8);
+            Ingest(e.Buffer, e.BytesRecorded, format);
         }
+    }
+
+    /// <summary>把一块 PCM 塞进 FFT 管线。调用方必须已经持有 _gate。</summary>
+    private void Ingest(byte[] buffer, int count, WaveFormat format)
+    {
+        int channels = Math.Max(1, format.Channels);
+        bool isFloat = format.Encoding == WaveFormatEncoding.IeeeFloat;
+        int bytesPerSample = isFloat ? 4 : Math.Max(1, format.BitsPerSample / 8);
+        int stride = bytesPerSample * channels;
+        if (stride <= 0) return;
+
+        for (int offset = 0; offset + stride <= count; offset += stride)
+        {
+            float value = 0;
+            for (int c = 0; c < channels; c++)
+                value += ReadSample(buffer, offset + c * bytesPerSample, isFloat);
+            _pending.Add(value / channels);
+        }
+
+        int consumed = 0;
+        while (_pending.Count - consumed >= FftSize)
+        {
+            Analyse(consumed);
+            consumed += FftSize / 2;   // 50% overlap，和皮肤一致
+        }
+        if (consumed > 0) _pending.RemoveRange(0, consumed);
+        // 攒得太多说明没人来取（比如 UI 被关掉了），别让它无限长大。
+        if (_pending.Count > FftSize * 8) _pending.RemoveRange(0, _pending.Count - FftSize * 8);
     }
 
     /// <summary>粗略能量（抽样算均方），只用来判断"哪块声卡在响"，不用精确。</summary>

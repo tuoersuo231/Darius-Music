@@ -19,6 +19,12 @@ public sealed class SpectrumSettings
     /// <summary>关掉整条不显示，也不开 WASAPI 回环（省一点 CPU）。</summary>
     public bool Enabled { get; set; } = true;
 
+    /// <summary>
+    /// 只抓本程序自己的声音（进程回环），别的播放器/网页不会让频谱跳。
+    /// 关掉 = 抓整块声卡的混音，系统里任何声音都会动。
+    /// </summary>
+    public bool OwnAudioOnly { get; set; } = true;
+
     /// <summary>条数。24 在 1166 px 宽下每根 ~48 px 偏粗；48 每根 ~24 px 更接近皮肤。</summary>
     public int Bars { get; set; } = 24;
 

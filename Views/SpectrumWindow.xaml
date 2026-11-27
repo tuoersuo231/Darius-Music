@@ -34,6 +34,13 @@
             </Grid>
             <Grid Margin="0,6">
               <StackPanel VerticalAlignment="Center" Margin="0,0,86,0">
+                <TextBlock Text="只响应本程序的声音" FontSize="13" />
+                <TextBlock Text="开：别的播放器、网页、提示音都不会让柱子跳。关：抓整块声卡的混音。" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,2,0,0" />
+              </StackPanel>
+              <CheckBox x:Name="chkOwnAudio" Style="{StaticResource Switch}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+            </Grid>
+            <Grid Margin="0,6">
+              <StackPanel VerticalAlignment="Center" Margin="0,0,86,0">
                 <TextBlock Text="浮在界面之上" FontSize="13" />
                 <TextBlock Text="开：柱子压在界面上（会挡播放条）。关：夹在壁纸和界面之间，界面自动半透明。" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,2,0,0" />
               </StackPanel>

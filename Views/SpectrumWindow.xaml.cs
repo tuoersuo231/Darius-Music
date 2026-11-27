@@ -51,6 +51,7 @@ public partial class SpectrumWindow : Window
         Hook(sldGhostAlpha, 0, 255, () => _settings.GhostAlpha, v => _settings.GhostAlpha = (int)Math.Round(v), txtGhostAlpha, "");
 
         BindSwitch(chkEnabled, () => _settings.Enabled, v => _settings.Enabled = v);
+        BindSwitch(chkOwnAudio, () => _settings.OwnAudioOnly, v => _settings.OwnAudioOnly = v);
         BindSwitch(chkOverlay, () => !_settings.IsBackdrop,
             v => _settings.Layer = v ? "overlay" : "backdrop", placement: true);
         BindSwitch(chkAutoGain, () => _settings.AutoGain, v => _settings.AutoGain = v);

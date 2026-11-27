@@ -140,6 +140,11 @@ public static class Program
             RunSpectrumTest(args, settings);
             return;
         }
+        if (args.Contains("--pl-test"))
+        {
+            RunProcessLoopbackTest(args);
+            return;
+        }
         if (args.Contains("--source-audit"))
         {
             RunSourceAudit(args, settings);
@@ -3056,8 +3061,34 @@ public static class Program
 
     /// <summary>QA: 真播一首（出声）同时抓 WASAPI 回环，看频谱到底能不能拿到数据、量级对不对。
     /// 音量默认 35%，测完就停。</summary>
-    private static void RunSpectrumTest(string[] args, AppSettings settings)
+    /// <summary>
+    /// 只测进程回环本身：抓指定 PID（默认自己）的声音，把字节数 / 报错打出来。
+    /// 用来区分"回环没通"和"目标进程根本没出声"。
+    /// </summary>
+    private static void RunProcessLoopbackTest(string[] args)
     {
+        var lines = new List<string>();
+        int pid = int.TryParse(Arg(args, "--pid"), out var parsedPid) ? parsedPid : Environment.ProcessId;
+        int seconds = int.TryParse(Arg(args, "--seconds"), out var secs) ? Math.Clamp(secs, 1, 30) : 5;
+        using var capture = new Services.ProcessLoopbackCapture();
+        capture.Mode = int.TryParse(Arg(args, "--mode"), out var mode) ? mode : 0;
+        long bytes = 0;
+        capture.Data += (_, count) => System.Threading.Interlocked.Add(ref bytes, count);
+        bool ok = capture.Start(pid);
+        lines.Add($"pid={pid} started={ok} error={capture.Error} format={capture.Format} " +
+                  $"block={capture.Format?.BlockAlign} rate={capture.Format?.SampleRate} buf={capture.BufferFrames}");
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        while (clock.Elapsed.TotalSeconds < seconds)
+        {
+            System.Threading.Thread.Sleep(200);
+            lines.Add($"t={clock.ElapsedMilliseconds,5}ms bytes={System.Threading.Interlocked.Read(ref bytes)} " +
+                      $"err={capture.Error} running={capture.Running}");
+        }
+        capture.Stop();
+        File.WriteAllLines(Arg(args, "--report") ?? "pl-test.txt", lines);
+    }
+
+    private static void RunSpectrumTest(string[] args, AppSettings settings)    {
         var lines = new List<string>();
         long id = long.TryParse(Arg(args, "--id"), out var parsed) ? parsed : 496869422L;
         int seconds = int.TryParse(Arg(args, "--seconds"), out var secs) ? Math.Clamp(secs, 1, 20) : 3;
