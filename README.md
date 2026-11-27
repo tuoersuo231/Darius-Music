@@ -2,6 +2,8 @@
 
 Windows 桌面音乐播放器 + 桌面歌词。WPF / .NET 10，无安装器、无运行时依赖注入；一个 exe 起一个进程，歌词逐字上色、延时辉光、3D 倾斜。
 
+**官网 / 下载：[darius.ethan231.top](https://darius.ethan231.top)**
+
 > A Windows music player with a desktop lyric overlay, written in WPF on .NET 10. Docs are in Chinese; code comments explain the why, not the what.
 
 ![主界面](docs/screenshots/main-window.png)
