@@ -9,19 +9,19 @@ namespace CurrentLyrics.Services;
 /// </summary>
 public static class WhisperDtw
 {
+    public const int MethodMedian = 0;
+    public const int MethodSegmental = 1;
+
     /// <summary>
-    /// attn is [nTok * stride] row-major, but only the first nFrames columns carry real audio
-    /// (the encoder always emits 1500 frames; a short window only fills the head of the array).
-    /// Returns inclusive frame ranges per token.
+    /// Per-token weighted median of the attention row, then forced monotonicity.
+    /// Simple and stable, but every token is decided independently, so durations get
+    /// flattened (that is why the gap correlation stays low).
     /// </summary>
-    public static (int Start, int End)[] Align(float[] attn, int nTok, int nFrames, int stride, int speechFrames = -1)
+    public static (int Start, int End)[] AlignMedian(float[] attn, int nTok, int nFrames, int stride)
     {
         var result = new (int Start, int End)[nTok];
         if (nTok <= 0 || nFrames <= 0 || stride < nFrames) return result;
 
-        // Weighted median of each token's attention row, then force strict monotonicity.
-        // Plain DTW degenerates here: whisper spreads a lot of mass over the window, so
-        // -log(attn) barely discriminates and the cheapest path collapses onto one frame.
         var pos = new int[nTok];
         var weight = new double[nFrames];
         for (int t = 0; t < nTok; t++)
@@ -51,7 +51,6 @@ public static class WhisperDtw
             if (pos[t] <= pos[t - 1]) pos[t] = pos[t - 1] + 1;
         for (int t = nTok - 1; t >= 0; t--)
             if (pos[t] > nFrames - 1) pos[t] = nFrames - 1;
-        // the monotonic pass from the left can overflow the last point; pull back
         for (int t = nTok - 2; t >= 0; t--)
             if (pos[t] >= pos[t + 1]) pos[t] = pos[t + 1] - 1;
         for (int t = 0; t < nTok; t++)
@@ -67,69 +66,119 @@ public static class WhisperDtw
         return result;
     }
 
-
-    /// <summary>Classic DTW with a monotonic path; the end of the path is anchored on the last
-    /// token's attention peak (the cheapest cell instead collapses on the first tokens).</summary>
-    public static (int Start, int End)[] AlignDtw(float[] attn, int nTok, int nFrames, int stride)
+    /// <summary>
+    /// Segmental DP: every token gets one contiguous run of frames, the runs are monotonic,
+    /// they fill the [lo, hi) window, and each run is between minDur and maxDur frames long.
+    ///
+    /// This is the CTC-style constraint that per-token medians lack: a token cannot collapse
+    /// into a single frame, and the total length has to add up. Maximises the attention mass
+    /// collected inside each run.
+    /// </summary>
+    public static (int Start, int End)[] AlignSegmental(float[] attn, int nTok, int nFrames, int stride,
+        int lo, int hi, int minDur, int maxDur)
     {
         var result = new (int Start, int End)[nTok];
-        if (nTok <= 0 || nFrames <= 0 || stride < nFrames) return result;
-        const double Eps = 1e-7;
-        int width = nFrames + 1;
-        var dir = new byte[nTok * width];
-        var prev = new double[width];
-        var cur = new double[width];
-
-        double Cost(int t, int f)
+        if (nTok <= 0 || nFrames <= 0) return result;
+        lo = Math.Clamp(lo, 0, Math.Max(0, nFrames - 1));
+        hi = Math.Clamp(hi, lo + 1, nFrames);
+        int span = hi - lo;
+        if (span <= nTok)
         {
-            double v = attn[t * stride + f];
-            if (v < Eps) v = Eps;
-            return -Math.Log(v);
-        }
-
-        prev[0] = double.PositiveInfinity;
-        for (int f = 1; f <= nFrames; f++) { prev[f] = Cost(0, f - 1); dir[f] = 0; }
-
-        for (int t = 1; t < nTok; t++)
-        {
-            cur[0] = double.PositiveInfinity;
-            int rb = t * width;
-            for (int f = 1; f <= nFrames; f++)
+            for (int i = 0; i < nTok; i++)
             {
-                double c = Cost(t, f - 1);
-                double diag = prev[f - 1], up = prev[f], left = cur[f - 1];
-                double best = diag; byte d = 0;
-                if (up < best) { best = up; d = 1; }
-                if (left < best) { best = left; d = 2; }
-                cur[f] = c + best;
-                dir[rb + f] = d;
+                int s = lo + span * i / nTok;
+                int e = Math.Max(s, lo + span * (i + 1) / nTok - 1);
+                result[i] = (s, e);
             }
-            var swap = prev; prev = cur; cur = swap;
+            return result;
         }
 
-        int lastRow = (nTok - 1) * stride;
-        int endF = 1; double peak = double.NegativeInfinity;
-        for (int f = 0; f < nFrames; f++)
-            if (attn[lastRow + f] > peak) { peak = attn[lastRow + f]; endF = f + 1; }
+        int avg = Math.Max(1, span / nTok);
+        if (minDur < 1) minDur = 1;
+        if (minDur > avg) minDur = Math.Max(1, avg / 2);
+        if (maxDur <= minDur) maxDur = minDur + 1;
+        if (maxDur > span) maxDur = span;
 
-        var starts = new int[nTok];
-        var ends = new int[nTok];
-        for (int i = 0; i < nTok; i++) { starts[i] = -1; ends[i] = -1; }
-        int ti = nTok - 1, fi = endF;
-        while (ti >= 0 && fi >= 1)
+        // prefix[t][j] = sum of attention[t] over frames [lo, lo+j)
+        var prefix = new double[nTok * (span + 1)];
+        for (int t = 0; t < nTok; t++)
         {
-            if (ends[ti] < 0) ends[ti] = fi - 1;
-            starts[ti] = fi - 1;
-            byte d = dir[ti * width + fi];
-            if (d == 0) { ti--; fi--; }
-            else if (d == 1) ti--;
-            else fi--;
+            int rb = t * stride;
+            int pb = t * (span + 1);
+            double acc = 0;
+            prefix[pb] = 0;
+            for (int f = 0; f < span; f++)
+            {
+                acc += Math.Max(0f, attn[rb + lo + f]);
+                prefix[pb + f + 1] = acc;
+            }
         }
-        for (int i = 0; i < nTok; i++)
+
+        const double Neg = double.NegativeInfinity;
+        int rowLen = span + 1;
+        var D = new double[(nTok + 1) * rowLen];
+        var from = new int[(nTok + 1) * rowLen];
+        for (int i = 0; i < D.Length; i++) { D[i] = Neg; from[i] = -1; }
+        for (int j = 0; j <= span; j++) D[j] = 0;   // any start is allowed
+
+        for (int t = 1; t <= nTok; t++)
         {
-            if (starts[i] < 0) starts[i] = 0;
-            if (ends[i] < starts[i]) ends[i] = starts[i];
-            result[i] = (starts[i], ends[i]);
+            int prow = (t - 1) * rowLen;
+            int crow = t * rowLen;
+            int pb = (t - 1) * rowLen;
+            int remaining = nTok - t;
+            for (int j = 0; j <= span; j++)
+            {
+                double best = Neg;
+                int bestFrom = -1;
+                int dHi = Math.Min(maxDur, j);
+                for (int d = minDur; d <= dHi; d++)
+                {
+                    int i2 = j - d;
+                    double prev = D[prow + i2];
+                    if (prev == Neg) continue;
+                    // the tokens that still have to fit need at least minDur each
+                    if (i2 + (t - 1) * minDur > span) continue;
+                    if (remaining > 0 && j + remaining * minDur > span) continue;
+                    double seg = prefix[pb + j] - prefix[pb + i2];
+                    double v = prev + seg;
+                    if (v > best) { best = v; bestFrom = i2; }
+                }
+                if (bestFrom >= 0) { D[crow + j] = best; from[crow + j] = bestFrom; }
+            }
+        }
+
+        int endJ = -1;
+        double endV = Neg;
+        int lastRow = nTok * rowLen;
+        for (int j = 0; j <= span; j++)
+            if (D[lastRow + j] > endV) { endV = D[lastRow + j]; endJ = j; }
+        if (endJ < 0)
+        {
+            for (int i = 0; i < nTok; i++)
+            {
+                int s = lo + span * i / nTok;
+                int e = Math.Max(s, lo + span * (i + 1) / nTok - 1);
+                result[i] = (s, e);
+            }
+            return result;
+        }
+
+        var cuts = new int[nTok + 1];
+        cuts[nTok] = endJ;
+        int jj = endJ;
+        for (int t = nTok; t >= 1; t--)
+        {
+            jj = from[t * rowLen + jj];
+            if (jj < 0) jj = 0;
+            cuts[t - 1] = jj;
+        }
+        for (int t = 0; t < nTok; t++)
+        {
+            int s = lo + cuts[t];
+            int e = lo + cuts[t + 1] - 1;
+            if (e < s) e = s;
+            result[t] = (s, e);
         }
         return result;
     }
@@ -140,7 +189,7 @@ public static class WhisperDtw
     /// that completes them.
     /// </summary>
     public static (string Ch, int Start, int End)[] ToCharacters(float[] attn, int nTok, int nFrames, int stride,
-        IReadOnlyList<string> pieces, int speechFrames, bool useDtw = false)
+        IReadOnlyList<string> pieces, int method, int lo = 0, int hi = -1, int minDur = 2, int maxDur = 60)
     {
         var groups = new List<List<int>>();
         var pending = new List<int>();
@@ -176,7 +225,10 @@ public static class WhisperDtw
                 for (int f = 0; f < nFrames; f++) charAttn[c * stride + f] /= sum;
         }
 
-        var spans = Align(charAttn, nChar, nFrames, stride, speechFrames);
+        var spans = method == MethodSegmental
+            ? AlignSegmental(charAttn, nChar, nFrames, stride, lo, hi < 0 ? nFrames : hi, minDur, maxDur)
+            : AlignMedian(charAttn, nChar, nFrames, stride);
+
         var chars = new (string Ch, int Start, int End)[nChar];
         var text = new System.Text.StringBuilder();
         foreach (var g in groups)

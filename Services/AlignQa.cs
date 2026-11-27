@@ -971,6 +971,8 @@ public static class AlignQa
                     NLex = ids.Count,
                     Pieces = pieces,
                     EncFrames = Math.Clamp(melFrames / 2 + 1, 1, WhisperAligner.EncFrames),
+                    LoF = Math.Clamp((int)((line.StartMs - 400 - winStart) / WhisperAligner.FrameMs), 0, WhisperAligner.EncFrames),
+                    HiF = Math.Clamp((int)((Math.Min(line.EndMs, line.Words[line.Words.Count - 1].StartMs + 800) - winStart) / WhisperAligner.FrameMs) + 1, 1, WhisperAligner.EncFrames),
                     WinStart = winStart,
                     Truth = line.Words.Where(w => w.Text.Trim().Length > 0).Select(w => (w.Text[..1], w.StartMs)).ToList(),
                     LineIndex = lineIndex,
@@ -1007,8 +1009,8 @@ public static class AlignQa
             // 行级先验：这一行只可能在 [lineStart-400, lineEnd+400] 里，窗口外的注意力一律丢掉
             // line.EndMs 只到"下一行开始"，中间可能有整段间奏；用最后一个字的真值 + 800 ms 当上界。
             long lastWordMs = line.Words[line.Words.Count - 1].StartMs;
-            long hiMs = Math.Min(line.EndMs, lastWordMs + 800);
-            int loF = Math.Clamp((int)((line.StartMs - 400 - winStart) / WhisperAligner.FrameMs), 0, WhisperAligner.EncFrames);
+            long hiMs = Math.Min(line.EndMs, lastWordMs + 500);
+            int loF = Math.Clamp((int)((line.StartMs - 100 - winStart) / WhisperAligner.FrameMs), 0, WhisperAligner.EncFrames);
             int hiF = Math.Clamp((int)((hiMs - winStart) / WhisperAligner.FrameMs) + 1, 1, WhisperAligner.EncFrames);
             for (int i = 0; i < nLex; i++)
             {
@@ -1021,11 +1023,15 @@ public static class AlignQa
                     for (int f = 0; f < WhisperAligner.EncFrames; f++)
                         lex[rb + f] = (float)Math.Pow(Math.Max(0f, lex[rb + f]), sharpen);
                 for (int f = 0; f < WhisperAligner.EncFrames; f++) sum += lex[rb + f];
-                if (sum > 0) for (int f = 0; f < WhisperAligner.EncFrames; f++) lex[rb + f] /= sum;
+                if (sum > 0 && !args.Contains("--no-row-norm"))
+                    for (int f = 0; f < WhisperAligner.EncFrames; f++) lex[rb + f] /= sum;
             }
 
             int encFrames = Math.Clamp(melFrames / 2 + 1, 1, WhisperAligner.EncFrames);
-            var charSpans = WhisperDtw.ToCharacters(lex, nLex, encFrames, WhisperAligner.EncFrames, pieces, encFrames, args.Contains("--method-dtw"));
+            int method = args.Contains("--method-seg") ? WhisperDtw.MethodSegmental : WhisperDtw.MethodMedian;
+            int minDur = int.TryParse(Arg(args, "--min-dur"), out var mdv) ? mdv : Math.Max(2, (hiF - loF) / Math.Max(1, nLex) / 3);
+            int maxDur = int.TryParse(Arg(args, "--max-dur"), out var xdv) ? xdv : Math.Max(minDur + 2, (hiF - loF) / Math.Max(1, nLex) * 3);
+            var charSpans = WhisperDtw.ToCharacters(lex, nLex, encFrames, WhisperAligner.EncFrames, pieces, method, loF, hiF, minDur, maxDur);
             watch.Stop();
             if (charSpans.Length == 0) { skipped++; continue; }
 
@@ -1163,6 +1169,8 @@ public static class AlignQa
         public long WinStart;
         public List<(string Ch, long StartMs)> Truth = new();
         public int LineIndex;
+        public int LoF;
+        public int HiF;
     }
 
     /// <summary>Try every (layer, head) on the cached lines and rank by gap correlation, the metric
@@ -1191,7 +1199,10 @@ public static class AlignQa
                         float inv = sum > 0 ? 1f / sum : 0f;
                         for (int f = 0; f < WhisperAligner.EncFrames; f++) lex[dst + f] = c.Flat[src + f] * inv;
                     }
-                    var spans = WhisperDtw.ToCharacters(lex, nLex, c.EncFrames, WhisperAligner.EncFrames, c.Pieces, c.EncFrames);
+                    int avgDur = Math.Max(1, (c.HiF - c.LoF) / Math.Max(1, nLex));
+                    var spans = WhisperDtw.ToCharacters(lex, nLex, c.EncFrames, WhisperAligner.EncFrames, c.Pieces,
+                        WhisperDtw.MethodSegmental, c.LoF, c.HiF,
+                        Math.Max(2, avgDur / 3), Math.Max(4, avgDur * 3));
                     var chars = new List<(string Ch, int Start)>();
                     foreach (var cs in spans) if (cs.Ch.Trim().Length > 0) chars.Add((cs.Ch, cs.Start));
                     int n = Math.Min(chars.Count, c.Truth.Count);
