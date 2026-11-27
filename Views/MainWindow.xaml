@@ -555,7 +555,7 @@
       <Grid x:Name="playerPage" Grid.ColumnSpan="2" Visibility="Collapsed" Panel.ZIndex="10" />
       <!-- 窗口最底边整条频谱：横跨侧边栏和主区，播放页也让出这一行（它在 Row 0）。
            SpectrumView 是 FrameworkElement 没有 Background，所以用 Border 兜底。 -->
-      <Border Grid.Row="1" Grid.ColumnSpan="2" Height="72" Background="{DynamicResource CardBrush}">
+      <Border Grid.Row="1" Grid.ColumnSpan="2" Background="{DynamicResource CardBrush}">
         <ctl:SpectrumView x:Name="bottomSpectrum" />
       </Border>
     </Grid.Children>

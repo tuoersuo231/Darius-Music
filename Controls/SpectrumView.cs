@@ -6,12 +6,14 @@ using CurrentLyrics.Services;
 namespace CurrentLyrics.Controls;
 
 /// <summary>
-/// 24 条镜像频谱：中间是低频、两边是高频，跟着系统输出跳。
+/// 镜像频谱条。中间低频、两边高频（<c>Mirror=false</c> 时从左到右由低到高），
+/// 实心条 + 慢衰减残影。
 ///
-/// 数据来自 <see cref="SpectrumService"/>（WASAPI 回环），所以不依赖播放器 —— 播什么都能跳，
-/// 包括别的程序的声音。所有实例共用一个 loopback，关到最后一个才停。
+/// 所有外观参数都来自 <see cref="SpectrumSettings"/>（settings.json 的 <c>Spectrum</c> 节点），
+/// 改完重启生效。数据来自 <see cref="SpectrumService"/>（WASAPI 回环），播什么都会跳。
 ///
-/// 画法照「简约频谱」皮肤：实心条是 150 ms 快衰减，后面拖一段 800 ms 慢衰减的残影。
+/// 所有实例共用一个回环，且**从不 Stop** —— 页面切换时控件会被移出可视树再放回来，
+/// 停掉再恢复要重新初始化 WASAPI，中间会丢几秒数据（看起来就是"频谱不动了"）。
 /// </summary>
 public sealed class SpectrumView : FrameworkElement
 {
@@ -19,57 +21,38 @@ public sealed class SpectrumView : FrameworkElement
     private static int _users;
 
     private readonly SpectrumService _service;
-    private readonly float[] _fast = new float[SpectrumService.BarCount];
-    private readonly float[] _slow = new float[SpectrumService.BarCount];
+    private SpectrumSettings _options = SpectrumOptions.Current;
 
     private SolidColorBrush? _fill;
     private SolidColorBrush? _ghost;
-    private Color _fillColor = Color.FromRgb(0xC7, 0x7D, 0xFF);
-    private double _gap = 3;
-    private double _radius = 1.5;
+    private Color _cachedFill = Colors.Transparent;
+    private int _cachedGhostAlpha = -1;
+
     private bool _running;
     private DispatcherTimer? _timer;
 
-    /// <summary>诊断用：回环抓了多少字节、画出来多宽、当前最大值。</summary>
-    public string DebugState =>
-        $"running={_service.Running} bytes={_service.BytesCaptured} frames={_service.Frames} " +
-        $"size={ActualWidth:0}x{ActualHeight:0} visible={IsVisible} " +
-        $"max={(_fast.Length > 0 ? _fast.Max() : 0f):0.00}";
+    /// <summary>诊断用：回环抓了多少字节、画出来多大、当前最大值。</summary>
+    public string DebugState
+    {
+        get
+        {
+            var fast = _service.Read();
+            float max = 0;
+            foreach (var value in fast) if (value > max) max = value;
+            return $"running={_service.Running} bytes={_service.BytesCaptured} frames={_service.Frames} " +
+                   $"size={ActualWidth:0}x{ActualHeight:0} visible={IsVisible} bars={fast.Length} max={max:0.00}";
+        }
+    }
 
     public SpectrumView()
     {
         _service = Acquire();
+        _options = SpectrumOptions.Current;
+        _service.Configure(_options);
         IsHitTestVisible = false;
         SnapsToDevicePixels = true;
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
-    }
-
-    /// <summary>条的颜色（主题强调色）。</summary>
-    public Color FillColor
-    {
-        get => _fillColor;
-        set
-        {
-            if (value == _fillColor) return;
-            _fillColor = value;
-            _fill = null;
-            _ghost = null;
-            InvalidateVisual();
-        }
-    }
-
-    /// <summary>条之间的空隙。</summary>
-    public double Gap
-    {
-        get => _gap;
-        set { _gap = Math.Max(0, value); InvalidateVisual(); }
-    }
-
-    public double CornerRadius
-    {
-        get => _radius;
-        set { _radius = Math.Max(0, value); InvalidateVisual(); }
     }
 
     private static SpectrumService Acquire()
@@ -77,6 +60,7 @@ public sealed class SpectrumView : FrameworkElement
         if (_shared == null)
         {
             _shared = new SpectrumService();
+            _shared.Configure(SpectrumOptions.Current);
             _shared.Start();
         }
         _users++;
@@ -85,15 +69,19 @@ public sealed class SpectrumView : FrameworkElement
 
     private static void Release()
     {
-        // 故意不 Stop：页面切换时控件会被 DetachShared 移出可视树再放回来，停掉再恢复要重新
-        // 初始化 WASAPI，中间会丢几秒数据（看起来就是"频谱不动了"）。loopback 本身只是每秒
-        // 九十几次 FFT，常驻代价可以忽略。
+        // 故意不 Stop，理由见类注释。
         if (_users > 0) _users--;
     }
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
         _service.Start();   // 幂等：布局重建会被移除又加回来，这里确保回环是活的
+
+        // 高度也交给配置，XAML 那边不写死，否则改了 settings.json 没反应。
+        double wanted = Math.Max(8, _options.Height);
+        if (double.IsNaN(Height) || Math.Abs(Height - wanted) > 0.5) Height = wanted;
+        Opacity = Math.Clamp(_options.Opacity <= 0 ? 1 : _options.Opacity, 0, 1);
+
         if (_running) return;
         _running = true;
         CompositionTarget.Rendering += OnFrame;
@@ -134,49 +122,64 @@ public sealed class SpectrumView : FrameworkElement
         double height = ActualHeight;
         if (width <= 1 || height <= 1) return;
 
-        if (_fill == null) _fill = Freeze(Color.FromArgb(255, _fillColor.R, _fillColor.G, _fillColor.B));
-        if (_ghost == null) _ghost = Freeze(Color.FromArgb(70, _fillColor.R, _fillColor.G, _fillColor.B));
+        var options = _options;
+        Color color = options.ResolveColor();
+        if (_fill == null || color != _cachedFill)
+        {
+            _cachedFill = color;
+            _fill = Freeze(Color.FromArgb(255, color.R, color.G, color.B));
+            _ghost = null;
+        }
+        int ghostAlpha = Math.Clamp(options.GhostAlpha, 0, 255);
+        if (_ghost == null || ghostAlpha != _cachedGhostAlpha)
+        {
+            _cachedGhostAlpha = ghostAlpha;
+            _ghost = Freeze(Color.FromArgb((byte)ghostAlpha, color.R, color.G, color.B));
+        }
 
         var fast = _service.Read();
         var slow = _service.Read(true);
-        Array.Copy(fast, _fast, Math.Min(fast.Length, _fast.Length));
-        Array.Copy(slow, _slow, Math.Min(slow.Length, _slow.Length));
+        int count = fast.Length;
+        if (count == 0) return;
 
-        int count = SpectrumService.BarCount;
-        int half = count / 2;
-        double totalGap = _gap * (count - 1);
-        double barWidth = Math.Max(1.2, (width - totalGap) / count);
+        double gap = Math.Max(0, options.Gap);
+        double radius = Math.Max(0, options.CornerRadius);
+        double totalGap = gap * (count - 1);
+        double barWidth = Math.Max(1.0, (width - totalGap) / count);
+        bool mirrored = options.Mirror;
 
         for (int i = 0; i < count; i++)
         {
-            // 镜像：i=0 和 i=count-1 都是最外侧的高频，中间是低频。
-            int source = Math.Abs(i - (count - 1) / 2.0) < 0.5
-                ? 0
-                : (int)Math.Round(Math.Abs(i - (count - 1) / 2.0));
-            source = Math.Clamp(source, 0, half);
+            int source = i;
+            if (mirrored)
+            {
+                // i=0 和 i=count-1 是最外侧的高频，中间是低频。
+                source = (int)Math.Round(Math.Abs(i - (count - 1) / 2.0));
+                source = Math.Clamp(source, 0, count / 2);
+            }
 
-            double x = i * (barWidth + _gap);
-            double solid = height * _fast[source];
-            double ghost = height * _slow[source];
+            double x = i * (barWidth + gap);
+            double solid = height * fast[source];
+            double ghost = options.Ghost ? height * slow[source] : 0;
 
             if (ghost > solid + 0.5)
-                DrawBar(dc, _ghost!, x, barWidth, height, ghost - solid, solid);
+                DrawBar(dc, _ghost!, x, barWidth, height, ghost - solid, solid, radius);
             if (solid > 0.5)
-                DrawBar(dc, _fill!, x, barWidth, height, solid, 0);
+                DrawBar(dc, _fill!, x, barWidth, height, solid, 0, radius);
         }
     }
 
-    private void DrawBar(DrawingContext dc, Brush brush, double x, double w, double height,
-        double h, double bottomOffset)
+    private static void DrawBar(DrawingContext dc, Brush brush, double x, double w, double height,
+        double h, double bottomOffset, double radius)
     {
-        double top = height - bottomOffset - h;
         if (h <= 0.5) return;
-        if (_radius <= 0.5)
+        double top = height - bottomOffset - h;
+        if (radius <= 0.5)
         {
             dc.DrawRectangle(brush, null, new Rect(x, top, w, h));
             return;
         }
-        double r = Math.Min(_radius, Math.Min(w / 2, h / 2));
+        double r = Math.Min(radius, Math.Min(w / 2, h / 2));
         dc.DrawRoundedRectangle(brush, null, new Rect(x, top, w, h), r, r);
     }
 
