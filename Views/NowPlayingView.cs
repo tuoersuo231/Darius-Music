@@ -83,6 +83,7 @@ public sealed class NowPlayingView : Grid
     private readonly Button _lyricsButton;
 
     private readonly LyricStackView _stack = new();
+    private readonly SpectrumView _spectrum = new();
     private readonly Border _lyricsHost;
     private readonly TextBlock _noLyrics;
 
@@ -441,6 +442,10 @@ public sealed class NowPlayingView : Grid
             left.Children.Add(head);
 
             var bottom = new StackPanel { VerticalAlignment = VerticalAlignment.Bottom };
+            _spectrum.Height = 44;
+            _spectrum.Margin = new Thickness(0, 0, 0, 14);
+            _spectrum.CornerRadius = 1.5;
+            bottom.Children.Add(_spectrum);
             _caption.Visibility = Visibility.Visible;
             bottom.Children.Add(_caption);
             bottom.Children.Add(_progressPanel);
@@ -461,6 +466,7 @@ public sealed class NowPlayingView : Grid
             _content.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             _content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });      // header
             _content.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }); // lyrics
+            _content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });      // spectrum
             _content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });      // progress
             _content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });      // controls
 
@@ -484,14 +490,20 @@ public sealed class NowPlayingView : Grid
             _lyricsHost.Margin = new Thickness(16, 14, 16, 8);
             _content.Children.Add(_lyricsHost);
 
+            _spectrum.Height = 48;
+            _spectrum.Margin = new Thickness(28, 0, 28, 4);
+            _spectrum.CornerRadius = 1.5;
+            Grid.SetRow(_spectrum, 2);
+            _content.Children.Add(_spectrum);
+
             _progressPanel.Margin = new Thickness(28, 0, 28, 0);
             _caption.Visibility = Visibility.Collapsed;
-            Grid.SetRow(_progressPanel, 2);
+            Grid.SetRow(_progressPanel, 3);
             _content.Children.Add(_progressPanel);
 
             _controls.Margin = new Thickness(0, 20, 0, 22);
             _controls.HorizontalAlignment = HorizontalAlignment.Center;
-            Grid.SetRow(_controls, 3);
+            Grid.SetRow(_controls, 4);
             _content.Children.Add(_controls);
 
             SetCompactHeader(_compactHeader);
@@ -503,7 +515,7 @@ public sealed class NowPlayingView : Grid
     private void DetachShared()
     {
         foreach (var element in new FrameworkElement[]
-                 { _coverFrame, _info, _progressPanel, _controls, _caption, _lyricsHost })
+                 { _coverFrame, _info, _progressPanel, _controls, _caption, _lyricsHost, _spectrum })
         {
             if (element.Parent is Panel panel) panel.Children.Remove(element);
         }

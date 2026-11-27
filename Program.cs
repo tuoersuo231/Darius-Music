@@ -135,6 +135,11 @@ public static class Program
             RunWordLevelTest(args);
             return;
         }
+        if (args.Contains("--spectrum-test"))
+        {
+            RunSpectrumTest(args, settings);
+            return;
+        }
         if (args.Contains("--source-audit"))
         {
             RunSourceAudit(args, settings);
@@ -3047,6 +3052,69 @@ public static class Program
     {
         try { return Task.Run(call).GetAwaiter().GetResult(); }
         catch { return null; }
+    }
+
+    /// <summary>QA: 真播一首（出声）同时抓 WASAPI 回环，看频谱到底能不能拿到数据、量级对不对。
+    /// 音量默认 35%，测完就停。</summary>
+    private static void RunSpectrumTest(string[] args, AppSettings settings)
+    {
+        var lines = new List<string>();
+        long id = long.TryParse(Arg(args, "--id"), out var parsed) ? parsed : 496869422L;
+        int seconds = int.TryParse(Arg(args, "--seconds"), out var secs) ? Math.Clamp(secs, 1, 20) : 3;
+        float volume = float.TryParse(Arg(args, "--volume"), out var vol) ? Math.Clamp(vol, 0f, 1f) : 0.35f;
+
+        Services.NeteaseApi.Cookie = settings.NeteaseCookie;
+        Services.NeteaseApi.Quality = settings.NeteaseQuality;
+
+        string? url = null;
+        try { url = Services.NeteaseApi.ResolveAsync(id, "exhigh").GetAwaiter().GetResult().Url; }
+        catch (Exception e) { lines.Add("resolve failed: " + e.Message); }
+        lines.Add($"id={id} url={(url == null ? "none" : "ok")} volume={volume:0.00} seconds={seconds}");
+
+        using var spectrum = new Services.SpectrumService();
+        spectrum.Start();
+        lines.Add($"capture running={spectrum.Running}");
+
+        Services.PlaybackService? playback = null;
+        if (url != null)
+        {
+            try
+            {
+                var song = new Models.Song
+                {
+                    Source = Models.SongSource.Netease,
+                    Path = $"netease:{id}",
+                    NeteaseId = id,
+                    Title = "spectrum-test",
+                    Artist = "qa",
+                    Duration = TimeSpan.FromMinutes(4),
+                };
+                playback = new Services.PlaybackService();
+                playback.Open(song, url);
+                playback.Volume = volume;
+                playback.Play();
+                lines.Add("player started");
+            }
+            catch (Exception e)
+            {
+                lines.Add("player failed: " + e.GetType().Name + ": " + e.Message);
+            }
+        }
+
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        while (watch.Elapsed.TotalSeconds < seconds)
+        {
+            System.Threading.Thread.Sleep(100);
+            var fast = spectrum.Read();
+            lines.Add($"t={watch.ElapsedMilliseconds,5}ms bytes={spectrum.BytesCaptured,8} " +
+                      $"frames={spectrum.Frames,3} peak={spectrum.Peak:0.00} " +
+                      $"fast=[{string.Join(",", fast.Select(b => b.ToString("0.0")))}]");
+        }
+
+        try { playback?.Pause(); } catch { }
+        playback?.Dispose();
+        spectrum.Stop();
+        File.WriteAllLines(Arg(args, "--report") ?? "spectrum-test.txt", lines);
     }
 
     private static void RunNeteaseTest(string[] args, AppSettings settings)
@@ -5996,6 +6064,9 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
         if (Arg(args, "--seek") is string seekArg && double.TryParse(seekArg, out var seekTarget))
         {
             controller.Seek(Math.Max(0, seekTarget));
+            // Seek 会把 MediaPlayer 停在暂停态（按钮变 ▶）。不接着播就没有声音，WASAPI 回环
+            // 抓到的全是 0，频谱一根都画不出来 —— 看起来像"控件没生效"。
+            try { controller.Playback.Play(); } catch { }
             for (int i = 0; i < 16; i++)
             {
                 app.Dispatcher.Invoke(() => { }, DispatcherPriority.Background);
