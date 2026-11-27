@@ -2683,7 +2683,7 @@ public partial class MainWindow : Window
         _nowPlayingView?.RefreshFromSettings();
         // The 下载与存储 window edits the cookie/quality too, so the API client has to follow it.
         ApplyNeteaseSettings();
-        string signature = $"{settings.ThemeImage}|{settings.ThemeAccent}|{settings.ThemeSurface}|{settings.ThemeOpacity:0.##}|{Services.SpectrumOptions.Current.Layer}";
+        string signature = $"{settings.ThemeImage}|{settings.ThemeAccent}|{settings.ThemeSurface}|{settings.ThemeOpacity:0.##}|{Services.SpectrumOptions.Current.Layer}|{Services.SpectrumOptions.Current.PanelSeeThrough}";
         if (signature != _themeSignature)
         {
             _themeSignature = signature;
@@ -2775,8 +2775,14 @@ public partial class MainWindow : Window
                          string.Equals(raw, Services.Palette.CoverToken, StringComparison.OrdinalIgnoreCase);
         string path = !coverMode && raw.Length > 0 && System.IO.File.Exists(raw) ? raw : "";
         bool photo = coverMode || path.Length > 0;
-        Services.Palette.Apply(_settings.ThemeAccent, _settings.ThemeSurface, photo,
-            Services.SpectrumOptions.Current.IsBackdrop ? (byte)0x99 : (byte)0xFF);
+        // 频谱在壁纸层时，面板必须让出透明，否则柱子一根都透不出来（0..80 由「面板透出」控制）。
+        byte cap = 0xFF;
+        if (Services.SpectrumOptions.Current.IsBackdrop)
+        {
+            int see = Math.Clamp(Services.SpectrumOptions.Current.PanelSeeThrough, 0, 80);
+            cap = (byte)Math.Round(255.0 * (100 - see) / 100.0);
+        }
+        Services.Palette.Apply(_settings.ThemeAccent, _settings.ThemeSurface, photo, cap);
         // 背景色选「透明」（8 位 AARRGGBB，alpha=00）时窗口必须是分层窗口才真的透过去看得到下层应用；
         // 这个属性只能在窗口创建前决定，所以切换要重启。若现在还不是玻璃窗口，这里先不透明，
         // 并给一句提示（见下面的 toast）。

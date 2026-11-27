@@ -28,6 +28,12 @@ public sealed class SpectrumSettings
     /// <summary>条的颜色，#RRGGBB 或 RRGGBB。</summary>
     public string Color { get; set; } = "#C77DFF";
 
+    /// <summary>最近用过的颜色（#RRGGBB），色盘里点过的会自动记到最前面。</summary>
+    public List<string> RecentColors { get; set; } = new()
+    {
+        "C77DFF", "00E5FF", "7DFF9E", "FFD166", "FF7D9C", "FFFFFF",
+    };
+
     /// <summary>条与条之间的空隙（DIP）。</summary>
     public double Gap { get; set; } = 3;
 
@@ -36,6 +42,12 @@ public sealed class SpectrumSettings
 
     /// <summary>整条的不透明度，0..1。</summary>
     public double Opacity { get; set; } = 1.0;
+
+    /// <summary>
+    /// 面板让出多少透明（0..80，百分比）。频谱藏到面板后面时，面板按这个值变半透明，
+    /// 柱子才透得出来。0 = 面板不透（那就一根都看不见），40 = 面板 60% 不透明。
+    /// </summary>
+    public int PanelSeeThrough { get; set; } = 40;
 
     /// <summary>频段下限（Hz）。600 是皮肤的值；调到 60 会有明显重低音。</summary>
     public double FreqMin { get; set; } = 600;
@@ -147,7 +159,37 @@ public sealed class SpectrumSettings
         SlowMs = double.IsNaN(SlowMs) || SlowMs < FastMs ? Math.Max(FastMs, 800) : Math.Min(4000, SlowMs);
         GhostAlpha = Math.Clamp(GhostAlpha <= 0 ? 70 : GhostAlpha, 0, 255);
         Layer = IsBackdrop ? "backdrop" : "overlay";
+        PanelSeeThrough = Math.Clamp(PanelSeeThrough, 0, 80);
+
+        // 颜色和"最近用过"都规整成 6 位大写十六进制，去重、限长。
+        var recents = new List<string>();
+        foreach (var raw in RecentColors ?? new List<string>())
+        {
+            var hex = NormalizeHex(raw);
+            if (hex.Length != 6 || recents.Contains(hex)) continue;
+            recents.Add(hex);
+            if (recents.Count >= 8) break;
+        }
+        var current = NormalizeHex(Color);
+        if (current.Length == 6)
+        {
+            recents.RemoveAll(h => string.Equals(h, current, StringComparison.OrdinalIgnoreCase));
+            recents.Insert(0, current);
+            Color = "#" + current;
+        }
+        if (recents.Count > 8) recents.RemoveRange(8, recents.Count - 8);
+        RecentColors = recents.Count > 0 ? recents : new List<string> { "C77DFF" };
         return this;
+    }
+
+    /// <summary>把 "#aabbcc" / "AABBCC" 规整成 6 位大写十六进制；不合法返回空串。</summary>
+    public static string NormalizeHex(string? hex)
+    {
+        var text = (hex ?? "").Trim().TrimStart('#');
+        if (text.Length != 6) return "";
+        foreach (var ch in text)
+            if (!Uri.IsHexDigit(ch)) return "";
+        return text.ToUpperInvariant();
     }
 
     /// <summary>把 #RRGGBB / RRGGBB 解析成颜色；解析不了就用默认紫粉。</summary>

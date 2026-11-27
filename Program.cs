@@ -6108,6 +6108,20 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
             if (main.FindName("bottomSpectrum") is Controls.SpectrumView liveSpectrum)
                 File.AppendAllText(Path.Combine(dir, "layout.txt"),
                     Environment.NewLine + "spectrum(live): " + liveSpectrum.DebugState);
+            // 面板透出（先测，因为切到 overlay 之后这个参数就没作用了）
+            File.AppendAllText(Path.Combine(dir, "layout.txt"),
+                Environment.NewLine + "spectrum see: " + spectrumWindow.DebugSetSeeThrough(70));
+            for (int i = 0; i < 10; i++) Pump(app, 80);
+            Save(main, Path.Combine(dir, "spectrum-see70.png"));
+            // 色盘 + 选色
+            File.AppendAllText(Path.Combine(dir, "layout.txt"),
+                Environment.NewLine + "spectrum picker: " + spectrumWindow.DebugOpenPicker());
+            for (int i = 0; i < 8; i++) Pump(app, 80);
+            Save(spectrumWindow, Path.Combine(dir, "spectrum-picker.png"));
+            File.AppendAllText(Path.Combine(dir, "layout.txt"),
+                Environment.NewLine + "spectrum color: " + spectrumWindow.DebugPickColor("FF8844"));
+            for (int i = 0; i < 8; i++) Pump(app, 80);
+            Save(spectrumWindow, Path.Combine(dir, "spectrum-color.png"));
             File.AppendAllText(Path.Combine(dir, "layout.txt"),
                 Environment.NewLine + "spectrum overlay: " + spectrumWindow.DebugSetOverlay(true) +
                 " parent=" + main.DebugSpectrumLayer());

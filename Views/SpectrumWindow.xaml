@@ -90,10 +90,17 @@
             </StackPanel>
             <StackPanel Margin="0,8">
               <Grid>
-                <TextBlock Text="整条不透明度" FontSize="13" />
+                <TextBlock Text="透明度" FontSize="13" />
                 <TextBlock x:Name="txtOpacity" HorizontalAlignment="Right" FontSize="12" Foreground="{DynamicResource AccentBrush}" />
               </Grid>
               <controls:DragOnlySlider x:Name="sldOpacity" Style="{StaticResource ThinSlider}" Margin="0,6,0,0" />
+            </StackPanel>
+            <StackPanel Margin="0,8,0,10">
+              <Grid>
+                <TextBlock Text="面板透出（柱子被挡住后还能看见多少）" FontSize="13" />
+                <TextBlock x:Name="txtSeeThrough" HorizontalAlignment="Right" FontSize="12" Foreground="{DynamicResource AccentBrush}" />
+              </Grid>
+              <controls:DragOnlySlider x:Name="sldSeeThrough" Style="{StaticResource ThinSlider}" Margin="0,6,0,0" />
             </StackPanel>
           </StackPanel>
         </Border>
@@ -105,16 +112,16 @@
               <TextBlock Text="颜色" FontSize="13" VerticalAlignment="Center" />
               <TextBlock x:Name="txtColor" HorizontalAlignment="Right" FontSize="12" Foreground="{DynamicResource AccentBrush}" VerticalAlignment="Center" />
             </Grid>
-            <WrapPanel Margin="0,10,0,0">
-              <Border Tag="#C77DFF" Width="34" Height="24" CornerRadius="6" Margin="0,0,8,8" Cursor="Hand" Background="#C77DFF" MouseLeftButtonUp="OnSwatchClick" />
-              <Border Tag="#00E5FF" Width="34" Height="24" CornerRadius="6" Margin="0,0,8,8" Cursor="Hand" Background="#00E5FF" MouseLeftButtonUp="OnSwatchClick" />
-              <Border Tag="#7DFF9E" Width="34" Height="24" CornerRadius="6" Margin="0,0,8,8" Cursor="Hand" Background="#7DFF9E" MouseLeftButtonUp="OnSwatchClick" />
-              <Border Tag="#FFD166" Width="34" Height="24" CornerRadius="6" Margin="0,0,8,8" Cursor="Hand" Background="#FFD166" MouseLeftButtonUp="OnSwatchClick" />
-              <Border Tag="#FF7D9C" Width="34" Height="24" CornerRadius="6" Margin="0,0,8,8" Cursor="Hand" Background="#FF7D9C" MouseLeftButtonUp="OnSwatchClick" />
-              <Border Tag="#FFFFFF" Width="34" Height="24" CornerRadius="6" Margin="0,0,8,8" Cursor="Hand" Background="#FFFFFF" MouseLeftButtonUp="OnSwatchClick" />
-              <Border Tag="#8FA2FF" Width="34" Height="24" CornerRadius="6" Margin="0,0,8,8" Cursor="Hand" Background="#8FA2FF" MouseLeftButtonUp="OnSwatchClick" />
-              <Border Tag="#FF9F45" Width="34" Height="24" CornerRadius="6" Margin="0,0,8,8" Cursor="Hand" Background="#FF9F45" MouseLeftButtonUp="OnSwatchClick" />
-            </WrapPanel>
+            <WrapPanel x:Name="swatchHost" Margin="0,10,0,0" />
+            <Button x:Name="btnPickColor" Content="自选颜色…" Style="{StaticResource GhostButton}" Padding="10,3" FontSize="12" Margin="0,2,0,0" HorizontalAlignment="Left" Click="OnPickColorClick" />
+          </StackPanel>
+        </Border>
+
+        <!-- 色盘（点「自选颜色…」才展开） -->
+        <Border x:Name="pickerCard" Background="{DynamicResource SurfaceBrush}" CornerRadius="14" Padding="18,14" BorderBrush="{DynamicResource HairlineBrush}" BorderThickness="1" Margin="0,12,0,0" Visibility="Collapsed">
+          <StackPanel>
+            <TextBlock Text="频谱颜色" Style="{StaticResource H2}" FontSize="13" Margin="0,0,0,10" />
+            <ContentControl x:Name="pickerHost" />
           </StackPanel>
         </Border>
 

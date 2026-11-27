@@ -1,6 +1,8 @@
+using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Threading;
 using CurrentLyrics.Controls;
 using CurrentLyrics.Services;
@@ -34,7 +36,10 @@ public partial class SpectrumWindow : Window
         Hook(sldBars, 4, 128, () => _settings.Bars, v => _settings.Bars = (int)Math.Round(v), txtBars, " 条");
         Hook(sldGap, 0, 24, () => _settings.Gap, v => _settings.Gap = v, txtGap, " px", "0.#");
         Hook(sldRadius, 0, 12, () => _settings.CornerRadius, v => _settings.CornerRadius = v, txtRadius, " px", "0.#");
-        Hook(sldOpacity, 0.05, 1, () => _settings.Opacity, v => _settings.Opacity = v, txtOpacity, "", "0.00");
+        Hook(sldOpacity, 0.05, 1, () => _settings.Opacity, v => _settings.Opacity = v, txtOpacity, "",
+            "0.00", v => $"{v * 100:0}%");
+        Hook(sldSeeThrough, 0, 80, () => _settings.PanelSeeThrough, v => _settings.PanelSeeThrough = (int)Math.Round(v),
+            txtSeeThrough, " %", "0", null, placement: true);
         Hook(sldFreqMin, 20, 2000, () => _settings.FreqMin, v => _settings.FreqMin = v, txtFreqMin, " Hz");
         Hook(sldFreqMax, 1000, 16000, () => _settings.FreqMax, v => _settings.FreqMax = v, txtFreqMax, " Hz");
         Hook(sldBoost, 1.0, 1.6, () => _settings.BoostPerBar, v => _settings.BoostPerBar = v, txtBoost, "×", "0.00",
@@ -53,6 +58,7 @@ public partial class SpectrumWindow : Window
         BindSwitch(chkGhost, () => _settings.Ghost, v => _settings.Ghost = v);
 
         txtColor.Text = _settings.Color;
+        RebuildSwatches();
         _loading = false;
         Closed += (_, _) =>
         {
@@ -62,7 +68,8 @@ public partial class SpectrumWindow : Window
 
     /// <summary>滑块 → 字段。范围、初值、读数文字一起带上。</summary>
     private void Hook(DragOnlySlider slider, double min, double max, Func<double> read, Action<double> write,
-        TextBlock label, string unit = "", string format = "0", Func<double, string>? text = null)
+        TextBlock label, string unit = "", string format = "0", Func<double, string>? text = null,
+        bool placement = false)
     {
         slider.Minimum = min;
         slider.Maximum = max;
@@ -74,7 +81,7 @@ public partial class SpectrumWindow : Window
             if (_loading) return;
             write(e.NewValue);
             label.Text = text?.Invoke(read()) ?? read().ToString(format) + unit;
-            Apply(placement: false);
+            Apply(placement);
         };
     }
 
@@ -103,10 +110,102 @@ public partial class SpectrumWindow : Window
         if (_loading) return;
         if (sender is FrameworkElement element && element.Tag is string hex)
         {
-            _settings.Color = hex;
-            txtColor.Text = hex;
+            _settings.Color = "#" + SpectrumSettings.NormalizeHex(hex);
+            txtColor.Text = _settings.Color;
+            RememberColor(hex);
             Apply(placement: false);
         }
+    }
+
+    /// <summary>点「自选颜色…」展开色盘。拖动实时改色，按确定才记进"最近用过"。</summary>
+    private void OnPickColorClick(object sender, RoutedEventArgs e)
+    {
+        if (pickerCard.Visibility == Visibility.Visible)
+        {
+            pickerCard.Visibility = Visibility.Collapsed;
+            pickerHost.Content = null;
+            return;
+        }
+
+        var panel = new ColorPickerPanel(_settings.Color);
+        panel.ColorChanged += hex =>
+        {
+            var clean = SpectrumSettings.NormalizeHex(hex);
+            if (clean.Length != 6) return;
+            _settings.Color = "#" + clean;
+            txtColor.Text = _settings.Color;
+            Apply(placement: false);
+        };
+        panel.Committed += hex =>
+        {
+            var clean = SpectrumSettings.NormalizeHex(hex);
+            if (clean.Length == 6)
+            {
+                _settings.Color = "#" + clean;
+                txtColor.Text = _settings.Color;
+                RememberColor(clean);
+                Apply(placement: false);
+            }
+            pickerCard.Visibility = Visibility.Collapsed;
+            pickerHost.Content = null;
+        };
+        panel.Cancelled += () =>
+        {
+            pickerCard.Visibility = Visibility.Collapsed;
+            pickerHost.Content = null;
+        };
+        pickerHost.Content = panel;
+        pickerCard.Visibility = Visibility.Visible;
+        // 色盘在下面，展开后滚到它那里，不然点完像没反应。
+        pickerCard.BringIntoView();
+    }
+
+    /// <summary>把颜色记到"最近用过"最前面，最多留 8 个。</summary>
+    private void RememberColor(string hex)
+    {
+        var clean = SpectrumSettings.NormalizeHex(hex);
+        if (clean.Length != 6) return;
+        _settings.RecentColors ??= new List<string>();
+        _settings.RecentColors.RemoveAll(h => string.Equals(h, clean, StringComparison.OrdinalIgnoreCase));
+        _settings.RecentColors.Insert(0, clean);
+        while (_settings.RecentColors.Count > 8)
+            _settings.RecentColors.RemoveAt(_settings.RecentColors.Count - 1);
+        RebuildSwatches();
+    }
+
+    private void RebuildSwatches()
+    {
+        if (swatchHost == null) return;
+        swatchHost.Children.Clear();
+        var active = SpectrumSettings.NormalizeHex(_settings.Color);
+        foreach (var hex in _settings.RecentColors ?? new List<string>())
+        {
+            var swatch = new Border
+            {
+                Width = 34,
+                Height = 24,
+                CornerRadius = new CornerRadius(6),
+                Margin = new Thickness(0, 0, 8, 8),
+                Cursor = Cursors.Hand,
+                Background = new SolidColorBrush(ParseHex(hex)),
+                Tag = "#" + hex,
+                ToolTip = "#" + hex,
+                BorderThickness = new Thickness(string.Equals(hex, active, StringComparison.OrdinalIgnoreCase) ? 2 : 0),
+                BorderBrush = Brushes.White,
+            };
+            swatch.MouseLeftButtonUp += OnSwatchClick;
+            swatchHost.Children.Add(swatch);
+        }
+    }
+
+    private static Color ParseHex(string hex)
+    {
+        if (hex != null && hex.Length == 6 &&
+            byte.TryParse(hex.AsSpan(0, 2), NumberStyles.HexNumber, null, out var r) &&
+            byte.TryParse(hex.AsSpan(2, 2), NumberStyles.HexNumber, null, out var g) &&
+            byte.TryParse(hex.AsSpan(4, 2), NumberStyles.HexNumber, null, out var b))
+            return Color.FromRgb(r, g, b);
+        return Color.FromRgb(0xC7, 0x7D, 0xFF);
     }
 
     /// <summary>QA：报当前参数。</summary>
@@ -122,7 +221,7 @@ public partial class SpectrumWindow : Window
         return $"requested={value:0} applied={_settings.Height:0}";
     }
 
-    /// <summary>QA：像点开关一样切层级，验证放在哪一层会立刻变。</summary>
+    /// <summary>QA：切层级。</summary>
     internal string DebugSetOverlay(bool overlay)
     {
         _loading = false;
@@ -130,5 +229,31 @@ public partial class SpectrumWindow : Window
         _settings.Layer = overlay ? "overlay" : "backdrop";
         Apply(placement: true);
         return $"overlay={overlay} layer={_settings.Layer}";
+    }
+
+    /// <summary>QA：面板透出百分比。</summary>
+    internal string DebugSetSeeThrough(int value)
+    {
+        _loading = false;
+        sldSeeThrough.Value = value;
+        return $"see={_settings.PanelSeeThrough}";
+    }
+
+    /// <summary>QA：像按确定一样选一个颜色（进"最近用过"）。</summary>
+    internal string DebugPickColor(string hex)
+    {
+        RememberColor(hex);
+        var clean = SpectrumSettings.NormalizeHex(hex);
+        if (clean.Length == 6) _settings.Color = "#" + clean;
+        txtColor.Text = _settings.Color;
+        Apply(placement: false);
+        return $"color={_settings.Color} recents={string.Join("/", _settings.RecentColors ?? new List<string>())}";
+    }
+
+    /// <summary>QA：展开色盘。</summary>
+    internal string DebugOpenPicker()
+    {
+        OnPickColorClick(this, new RoutedEventArgs());
+        return pickerCard.Visibility.ToString();
     }
 }
