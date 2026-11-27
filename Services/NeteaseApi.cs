@@ -302,10 +302,24 @@ public static class NeteaseApi
         return new UrlResult(string.IsNullOrEmpty(url) ? null : Upgrade(url), actualLevel, code, expi, trial, error);
     }
 
+    private static bool HasLyricBody(JsonObject? root)
+    {
+        if (root == null) return false;
+        foreach (var key in new[] { "yrc", "klyric", "lrc" })
+        {
+            if ((root[key] as JsonObject)?["lyric"]?.GetValue<string>() is { Length: > 0 }) return true;
+        }
+        return false;
+    }
+
     /// <summary>Raw `song/lyric` response: `lrc` (line level), `yrc` (word level for songs that have
     /// it), `klyric` (karaoke), `tlyric` (translation). The request has to ask for `yv` explicitly —
     /// without it the API only returns line-level LRC, which is what made the karaoke sweep advance at
-    /// a constant rate instead of following the singing.</summary>
+    /// a constant rate instead of following the singing.
+    ///
+    /// 2026-11-27 实测：这个接口对**有**逐字的歌手确实会返回 `yrc`（孤勇者 9869 B / 起风了 7946 B），
+    /// 对没有的（夜曲、稻香、晴天、兰亭序 的原版）任何参数组合都不返回 —— `song/lyric/v1`、eapi 的
+    /// cp/yv/e_r 变体都试过，返回的键一模一样，所以逐字与否是曲库问题，不是接口选错。</summary>
     internal static async Task<JsonObject?> LyricRootAsync(long id, CancellationToken token = default)
     {
         var payload = new JsonObject
@@ -313,7 +327,7 @@ public static class NeteaseApi
             ["id"] = id, ["lv"] = -1, ["kv"] = -1, ["tv"] = -1, ["yv"] = -1, ["ytv"] = -1, ["rv"] = -1,
         };
         var root = await PostAsync("song/lyric", payload, token);
-        if (root != null && (root["lrc"] != null || root["yrc"] != null || root["klyric"] != null)) return root;
+        if (HasLyricBody(root)) return root;
         return await PostAsync("lyric", payload, token) ?? root;
     }
 

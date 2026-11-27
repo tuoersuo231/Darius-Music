@@ -479,6 +479,11 @@ public static class Program
             RunKeyQa(app, args, settings);
             return;
         }
+        if (args.Contains("--lyric-probe"))
+        {
+            RunLyricProbe(args, settings);
+            return;
+        }
         if (args.Contains("--chrome-qa"))
         {
             RunChromeQa(app, args, settings);
@@ -3383,6 +3388,62 @@ public static class Program
         look.Close();
         main.ForceExit();
         app.Shutdown();
+    }
+
+    /// <summary>
+    /// QA: 在线逐字到底有没有拿到。搜索一首歌，把 song/lyric 返回里有哪几个键、yrc 第一行长什么样
+    /// 写进报告（--lyric-probe "歌名" --report 文件）。
+    /// </summary>
+    private static void RunLyricProbe(string[] args, AppSettings settings)
+    {
+        string query = Arg(args, "--lyric-probe") ?? "夜曲";
+        string report = Arg(args, "--report") ?? "lyric-probe.txt";
+        var lines = new List<string> { $"query={query}" };
+        try
+        {
+            Services.NeteaseApi.Cookie = settings.NeteaseCookie;
+            Services.NeteaseApi.Quality = settings.NeteaseQuality;
+            var page = Services.NeteaseApi.SearchAsync(query, 3).GetAwaiter().GetResult();
+            lines.Add($"results={page.Songs.Count}");
+            foreach (var song in page.Songs.Take(3))
+            {
+                var root = Services.NeteaseApi.LyricRootAsync(song.NeteaseId).GetAwaiter().GetResult();
+                string keys = root == null ? "(null)" : string.Join(",", root.Select(kv => kv.Key));
+                var yrc = root?["yrc"]?["lyric"]?.GetValue<string>() ?? "";
+                var lrc = root?["lrc"]?["lyric"]?.GetValue<string>() ?? "";
+                var klyric = root?["klyric"]?["lyric"]?.GetValue<string>() ?? "";
+                lines.Add($"id={song.NeteaseId} '{song.DisplayTitle}' keys=[{keys}]");
+                lines.Add($"   yrc={yrc.Length}B klyric={klyric.Length}B lrc={lrc.Length}B");
+                if (yrc.Length > 0)
+                {
+                    var first = yrc.Split('\n').FirstOrDefault(l => l.Contains('('));
+                    lines.Add("   yrc sample: " + (first ?? yrc.Split('\n')[0]));
+                }
+                var converted = Services.NeteaseApi.LyricAsync(song.NeteaseId).GetAwaiter().GetResult() ?? "";
+                bool wordTimed = converted.Contains('<') || converted.Contains('(');
+                var doc = Services.LrcParser.Parse(converted);
+                int linesWithWords = doc.Lines.Count(l => l.Words.Count > 0);
+                lines.Add($"   LyricAsync {converted.Length}B wordTimed={wordTimed} " +
+                          $"lines={doc.Lines.Count} linesWithWords={linesWithWords} " +
+                          $"hasWordTiming={Services.LrcParser.HasWordTiming(doc)}");
+                var head = converted.Split('\n').FirstOrDefault(l => l.Contains('['));
+                lines.Add("   body sample: " + (head ?? ""));
+                if (doc.Lines.Count > 0)
+                {
+                    var withWords = doc.Lines.FirstOrDefault(l => l.Words.Count > 0);
+                    if (withWords != null)
+                        lines.Add($"   parsed words: n={withWords.Words.Count} first='{withWords.Words[0].Text}' " +
+                                  $"@{withWords.Words[0].StartMs:0}-{withWords.Words[0].EndMs:0} " +
+                                  $"last@{(withWords.Words[^1].StartMs):0} estimated={withWords.WordsEstimated}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            lines.Add("failed: " + ex.GetType().Name + " " + ex.Message);
+        }
+        File.WriteAllLines(report, lines);
+        Console.WriteLine(string.Join("\n", lines));
     }
 
     /// <summary>QA: 调一次色是否挤掉一个默认色、总数不变、常用色落盘（--swatch-qa）。</summary>
