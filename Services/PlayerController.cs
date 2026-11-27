@@ -1114,20 +1114,28 @@ public sealed class PlayerController : IDisposable
         catch { return null; }
     }
 
-    private static bool IsFresh(string path, double days)
-    {
-        try { return File.Exists(path) && (DateTime.UtcNow - File.GetLastWriteTimeUtc(path)).TotalDays < days; }
-        catch { return false; }
-    }
-
     private static void Touch(string path)
     {
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            File.WriteAllText(path, DateTime.UtcNow.ToString("o"));
+            // 版本前缀：旧版本写的记号（只有一行时间戳）不再被信任，所以升级后会重新联网试一次。
+            File.WriteAllText(path, MarkerVersion + " " + DateTime.UtcNow.ToString("o"));
         }
         catch { }
+    }
+
+    private const string MarkerVersion = "v2";
+
+    private static bool IsFresh(string path, double days)
+    {
+        try
+        {
+            if (!File.Exists(path)) return false;
+            if (!File.ReadAllText(path).StartsWith(MarkerVersion, StringComparison.Ordinal)) return false;
+            return (DateTime.UtcNow - File.GetLastWriteTimeUtc(path)).TotalDays < days;
+        }
+        catch { return false; }
     }
 
         public PlayMode Mode => Settings.PlayMode;

@@ -15,7 +15,7 @@
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <StartupObject>CurrentLyrics.Program</StartupObject>
-    <Version>1.2.84</Version>
+    <Version>1.2.85</Version>
     <Product>Darius Music</Product>
     <AssemblyTitle>Darius Music</AssemblyTitle>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>

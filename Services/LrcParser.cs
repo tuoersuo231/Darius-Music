@@ -323,12 +323,19 @@ public static partial class LrcParser
     private static bool IsCjk(char c) =>
         (c >= '\u3400' && c <= '\u9fff') || (c >= '\u3040' && c <= '\u30ff') || (c >= '\uac00' && c <= '\ud7af');
 
-    /// <summary>Spread a line without word timing across its clusters so the sweep still runs.</summary>
+    /// <summary>
+    /// Spread a line without word timing across its clusters so the sweep still runs.
+    ///
+    /// 但**不能**按「行到下一行」的整段铺满：行级 LRC 的下一行标签包含间奏，一句 11 个字的歌词后面
+    /// 接 17 秒前奏时，每个字能分到 1.6 秒 —— 唱完以后高亮还在慢慢爬，看起来就是「匀速动画」。
+    /// 所以给字时长设一个上限（每字 400 ms，至少 1.5 s），超长的空白留在句尾不动。
+    /// </summary>
     private static void SynthesizeWords(LyricLine line)
     {
         var clusters = Clusters(line.Text);
         if (clusters.Count == 0) return;
-        long span = Math.Max(400, line.EndMs - line.StartMs);
+        long gap = Math.Max(400, line.EndMs - line.StartMs);
+        long span = Math.Min(gap, Math.Max(1500, clusters.Count * 400L));
         double weight = clusters.Sum(c => c.weight);
         long cursor = line.StartMs;
         foreach (var (text, start, length, weightPart) in clusters)

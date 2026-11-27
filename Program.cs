@@ -3177,6 +3177,7 @@ public static class Program
             foreach (var line in doc.Lines.Take(4000))
             {
                 lines.Add($"{line.StartMs,7}-{line.EndMs,7} words={line.Words.Count,-2} " +
+                          (line.Words.Count > 0 ? $"[{line.Words[0].StartMs}..{line.Words[^1].EndMs}] " : "") +
                           $"trOnly={(line.TranslationOnly ? 1 : 0)} text='{line.Text}' " +
                           (line.Translation.Length > 0 ? $"tr='{line.Translation}'" : ""));
             }
