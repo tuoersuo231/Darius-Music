@@ -1,6 +1,7 @@
 <Window x:Class="CurrentLyrics.Views.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ctl="clr-namespace:CurrentLyrics.Controls"
         Title="Darius Music" Height="760" Width="1180" MinHeight="600" MinWidth="1080"
         WindowStartupLocation="CenterScreen" Icon="/Assets/app.png"
         Background="{DynamicResource WindowWashBrush}"
@@ -451,11 +452,16 @@
           </Border>
           <!-- No gap above the player bar: the 12 DIP strip used to show the raw (bright) cover
                backdrop through it, which read as a missing block under the song list. -->
-          <Border Grid.Row="2" Height="92" Margin="0" Background="{DynamicResource CardBrush}">
+          <Border Grid.Row="2" Height="126" Margin="0" Background="{DynamicResource CardBrush}">
             <Border.Child>
               <Grid>
+                <Grid.RowDefinitions>
+                  <RowDefinition Height="Auto" />
+                  <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
                 <Grid.Children>
-                  <Grid x:Name="playerBar" MouseLeftButtonUp="OnPlayerBarClick" Margin="24,0,24,0" Background="#00FFFFFF">
+                  <ctl:SpectrumView x:Name="homeSpectrum" Grid.Row="0" Height="32" Margin="24,4,24,0" Opacity="0.8" />
+                  <Grid x:Name="playerBar" Grid.Row="1" MouseLeftButtonUp="OnPlayerBarClick" Margin="24,0,24,0" Background="#00FFFFFF">
                     <Grid.RowDefinitions>
                       <RowDefinition Height="*" />
                       <RowDefinition Height="Auto" />

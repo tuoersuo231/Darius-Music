@@ -30,6 +30,12 @@ public sealed class SpectrumView : FrameworkElement
     private bool _running;
     private DispatcherTimer? _timer;
 
+    /// <summary>诊断用：回环抓了多少字节、画出来多宽、当前最大值。</summary>
+    public string DebugState =>
+        $"running={_service.Running} bytes={_service.BytesCaptured} frames={_service.Frames} " +
+        $"size={ActualWidth:0}x{ActualHeight:0} visible={IsVisible} " +
+        $"max={(_fast.Length > 0 ? _fast.Max() : 0f):0.00}";
+
     public SpectrumView()
     {
         _service = Acquire();

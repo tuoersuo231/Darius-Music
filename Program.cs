@@ -5939,7 +5939,9 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
             if (onlinePlay && controller.Songs.Count > 0)
             {
                 if (args.Contains("--cover-backdrop")) main.DebugUseCoverBackdrop();
-                controller.Playback.SetVolume(0);
+                // 默认静音（截图不该吵人）；要看频谱必须加 --audible —— WASAPI 回环抓的是输出，
+                // 静音时抓到的全是 0，频谱一根都不会动，看起来像"控件没生效"。
+                controller.Playback.SetVolume(args.Contains("--audible") ? 0.30f : 0f);
                 RunBlocking(app, controller.PlayAsync(controller.Songs[0]));
                 for (int i = 0; i < 40; i++)
                 {
@@ -6084,6 +6086,9 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
         app.Dispatcher.Invoke(() => { }, DispatcherPriority.Background);
         Save(main, Path.Combine(dir, "main.png"));
         File.WriteAllText(Path.Combine(dir, "layout.txt"), main.DebugLayout());
+        if (main.FindName("homeSpectrum") is Controls.SpectrumView homeSpectrum)
+            File.AppendAllText(Path.Combine(dir, "layout.txt"),
+                Environment.NewLine + "spectrum: " + homeSpectrum.DebugState);
 
         // QA: open one tooltip so its themed look can be screenshotted (the stock WPF one is white).
         if (args.Contains("--tooltip"))
