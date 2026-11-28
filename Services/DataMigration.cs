@@ -17,27 +17,54 @@ public static class DataMigration
 
     private const string Marker = "migrated-from.txt";
 
-    public static void TryImportOnce()
+    /// <summary>
+    /// 第一次启动：如果本机别处还留着旧数据，**问一句**要不要导入（默认「否」）。
+    /// 以前是静默导入，结果"全新安装"也会带上旧歌单，用户会以为安装包里夹了数据。
+    /// </summary>
+    public static void TryImportOnce(bool interactive)
     {
         if (Environment.GetEnvironmentVariable("DARIUS_NO_MIGRATE") == "1") return;
         try
         {
             var target = AppPaths.DataDir;
             if (File.Exists(Path.Combine(target, "settings.json"))) return;   // 已经有自己的数据
+            if (File.Exists(Path.Combine(target, "migration-asked.txt"))) return;   // 问过了，别再烦
             // 先把"上次用的数据目录"读出来，再写注册表 —— 否则会把自己刚写的新目录当成候选。
             var known = ReadKnownDataDir();
-            foreach (var source in Candidates(known))
+            string? source = null;
+            foreach (var candidate in Candidates(known))
             {
-                if (string.IsNullOrWhiteSpace(source)) continue;
-                if (string.Equals(Path.GetFullPath(source), Path.GetFullPath(target), StringComparison.OrdinalIgnoreCase))
+                if (string.IsNullOrWhiteSpace(candidate)) continue;
+                if (string.Equals(Path.GetFullPath(candidate), Path.GetFullPath(target), StringComparison.OrdinalIgnoreCase))
                     continue;
-                if (!File.Exists(Path.Combine(source, "settings.json"))) continue;
-
-                var (files, bytes) = CopySmallFiles(source, target);
-                if (files == 0) continue;
-                try { File.WriteAllText(Path.Combine(target, Marker), source + Environment.NewLine); } catch { }
-                Report = $"已导入旧配置：{source}（{files} 个文件，{bytes / 1024.0 / 1024.0:0.0} MB）";
+                if (!File.Exists(Path.Combine(candidate, "settings.json"))) continue;
+                source = candidate;
                 break;
+            }
+            if (source != null)
+            {
+                // QA / 命令行模式不弹窗、也不导入，保证截图和自动化是干净环境。
+                if (!interactive) return;
+                var answer = System.Windows.MessageBox.Show(
+                    "检测到本机还有旧版本的数据：\n" + source + "\n\n要把歌单和设置导入到这个新安装里吗？\n" +
+                    "选「否」就是全新开始，旧数据不会被改动。",
+                    "Darius Music", System.Windows.MessageBoxButton.YesNo,
+                    System.Windows.MessageBoxImage.Question, System.Windows.MessageBoxResult.No);
+                try
+                {
+                    File.WriteAllText(Path.Combine(target, "migration-asked.txt"),
+                        answer + " <- " + source + Environment.NewLine);
+                }
+                catch { }
+                if (answer == System.Windows.MessageBoxResult.Yes)
+                {
+                    var (files, bytes) = CopySmallFiles(source, target);
+                    if (files > 0)
+                    {
+                        try { File.WriteAllText(Path.Combine(target, Marker), source + Environment.NewLine); } catch { }
+                        Report = $"已导入旧配置：{source}（{files} 个文件，{bytes / 1024.0 / 1024.0:0.0} MB）";
+                    }
+                }
             }
             RememberInstall();
             if (Report is { Length: > 0 })

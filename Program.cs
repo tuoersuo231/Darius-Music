@@ -76,7 +76,7 @@ public static class Program
         }
 
         // 1.3.18：安装形态变了（%LocalAppData%），新目录为空时把旧安装/绿色版的 data 搬过来。
-        Services.DataMigration.TryImportOnce();
+        Services.DataMigration.TryImportOnce(!args.Any(a => a.StartsWith("--", StringComparison.Ordinal)));
         var settings = SettingsStore.Load();
 
         // 随包的落雪音源：干净的机器装完就有，否则网易云一句「无版权或需要会员」就没后备了。
