@@ -2850,12 +2850,7 @@ public partial class MainWindow : Window
                          string.Equals(raw, Services.Palette.CoverToken, StringComparison.OrdinalIgnoreCase);
         string path = !coverMode && raw.Length > 0 && System.IO.File.Exists(raw) ? raw : "";
         bool photo = coverMode || path.Length > 0;
-        // 频谱层级自动判断（1.3.16）：面板自己够透就夹在壁纸和面板之间，面板不透明就浮在上面。
-        // 以前是用户在「频谱设置」里切，切到"夹中间"而面板又不透时，整条频谱就被挡住了看不见。
-        var surfaceHex = Services.Palette.Normalize(_settings.ThemeSurface, Services.Palette.DefaultSurface);
-        byte surfaceAlpha = Services.Palette.SurfaceAlpha(surfaceHex);
-        byte basePlate = surfaceAlpha < 0xFF ? surfaceAlpha : photo ? (byte)0xDA : (byte)0xFF;
-        Services.SpectrumOptions.Backdrop = basePlate <= 0xD8;
+        // 频谱永远夹在壁纸和面板之间（1.3.17）：不许挡 UI，也不看背景色/背景图。被挡住时靠「面板透出」让出透明。
         // 频谱在壁纸层时，面板必须让出透明，否则柱子一根都透不出来（0..80 由「面板透出」控制）。
         byte cap = 0xFF;
         if (Services.SpectrumOptions.Current.IsBackdrop)

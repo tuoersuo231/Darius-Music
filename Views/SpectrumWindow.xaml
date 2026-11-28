@@ -41,12 +41,6 @@
             </Grid>
             <Grid Margin="0,6">
               <StackPanel VerticalAlignment="Center" Margin="0,0,86,0">
-                <TextBlock Text="自动贴最底层" FontSize="13" />
-                <TextBlock Text="面板够透时自动夹在壁纸和面板之间，面板不透明就浮在界面上（保证看得见）。已改为自动判断，没有开关。" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,2,0,0" />
-              </StackPanel>
-            </Grid>
-            <Grid Margin="0,6">
-              <StackPanel VerticalAlignment="Center" Margin="0,0,86,0">
                 <TextBlock Text="自动增益" FontSize="13" />
                 <TextBlock Text="让当前最响的那条自动顶到 92%，音量小也不会缩成一条线。" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,2,0,0" />
               </StackPanel>

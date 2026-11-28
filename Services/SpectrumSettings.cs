@@ -234,8 +234,9 @@ public static class SpectrumOptions
     public static SpectrumSettings Current { get; set; } = new();
 
     /// <summary>
-    /// 频谱该夹在壁纸和面板之间吗？由 MainWindow.ApplyAppearance 按面板的实际透明度算出来：
-    /// 面板够透（plate 小于等于 216）→ true；面板不透明 → false（浮在界面之上，保证看得见）。
+    /// 频谱该夹在壁纸和面板之间吗？**永远是 true**（1.3.17 起）：
+    /// 用户要求"一定要在 UI 后一层，不能挡住 UI"，并且不接受背景色/背景图影响这个选择。
+    /// 柱子被面板挡住时靠「面板透出」让面板让一点透明。
     /// </summary>
-    public static bool Backdrop { get; set; }
+    public const bool Backdrop = true;
 }

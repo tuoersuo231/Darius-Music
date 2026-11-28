@@ -64,9 +64,6 @@ public partial class SpectrumWindow : Window
         txtColor.Text = _settings.Color;
         RebuildSwatches();
         _loading = false;
-        // 打开窗口时先按当前层级把「面板透出」的可用状态摆对（自动判断是只读的）。
-        sldSeeThrough.IsEnabled = SpectrumOptions.Backdrop;
-        sldSeeThrough.Opacity = SpectrumOptions.Backdrop ? 1 : 0.45;
         Closed += (_, _) =>
         {
             try { _settings.Write(); } catch { }
@@ -105,9 +102,6 @@ public partial class SpectrumWindow : Window
 
     private void Apply(bool placement)
     {
-        // 面板本来就不透明时频谱会浮在上面，「面板透出」这一项不起作用 —— 置灰，别让人拖了没反应。
-        sldSeeThrough.IsEnabled = SpectrumOptions.Backdrop;
-        sldSeeThrough.Opacity = SpectrumOptions.Backdrop ? 1 : 0.45;
         SpectrumView.RefreshAll();
         // 只有动了"层级"才需要重排窗口配色（面板透明度跟着层走），拖条不用。
         if (placement) _onChanged?.Invoke();
