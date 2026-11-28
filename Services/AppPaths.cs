@@ -15,8 +15,6 @@ public static class AppPaths
 {
     public static string DataDir { get; } = Resolve();
 
-    private static readonly string LocalData =
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Darius Music");
 
     /// <summary>安装形态：只有 Inno 装出来的才有卸载项和固定目录；绿色版靠 portable.txt 判断。</summary>
     public static bool IsPortable =>
@@ -35,8 +33,25 @@ public static class AppPaths
         if (File.Exists(Path.Combine(AppContext.BaseDirectory, "portable.txt")) &&
             Ensure(Path.Combine(AppContext.BaseDirectory, "data")) is { } portable) return portable;
 
-        // 正常安装：%LocalAppData%\Darius Music\data。
-        if (Ensure(Path.Combine(LocalData, "data")) is { } installed) return installed;
+        // 正常安装：exe 在 <LocalAppData>\Programs\Darius Music\，数据放上一层的 Darius Music\data。
+        // 直接由 exe 路径推出来，不依赖 GetFolderPath（它在某些受限/提权上下文里会返回空）。
+        var baseDir = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
+        var installedMarker = Path.Combine("Programs", "Darius Music");
+        if (baseDir.EndsWith(installedMarker, StringComparison.OrdinalIgnoreCase))
+        {
+            var localRoot = Path.GetDirectoryName(Path.GetDirectoryName(baseDir));
+            if (!string.IsNullOrWhiteSpace(localRoot) &&
+                Ensure(Path.Combine(localRoot, "Darius Music", "data")) is { } installed)
+                return installed;
+        }
+
+        // 兜底：用系统 API 拿 LocalAppData（绿色版放在别处时走这条）。
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (string.IsNullOrWhiteSpace(localAppData))
+            localAppData = Environment.GetEnvironmentVariable("LOCALAPPDATA") ?? "";
+        if (!string.IsNullOrWhiteSpace(localAppData) &&
+            Ensure(Path.Combine(localAppData, "Darius Music", "data")) is { } installed2)
+            return installed2;
 
         // 兜底：临时目录里也得能跑起来。
         if (Ensure(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Darius Music")) is { } roaming)
@@ -55,9 +70,21 @@ public static class AppPaths
             File.Delete(probe);
             return path;
         }
-        catch
+        catch (Exception e)
         {
+            // 落选的原因要留痕：数据目录选错是"设置丢了"这类问题里最难查的一环。
+            Trace(path + " -> " + e.GetType().Name + ": " + e.Message);
             return null;
         }
+    }
+
+    private static void Trace(string line)
+    {
+        try
+        {
+            File.AppendAllText(Path.Combine(Path.GetTempPath(), "darius-apppaths.log"),
+                DateTime.Now.ToString("MM-dd HH:mm:ss") + " " + line + Environment.NewLine);
+        }
+        catch { }
     }
 }
