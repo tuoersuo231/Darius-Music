@@ -413,7 +413,12 @@ public static class UpdateService
     /// <summary>静默跑安装包（Inno Setup 的参数），装完由安装包自己启动新版本。</summary>
     public static void LaunchSetup(string setupPath, bool silent = true)
     {
-        var args = silent ? "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /NOCANCEL" : "";
+        // /DIR 必须显式指回当前安装目录：安装脚本设了 UsePreviousAppDir=no（手动安装时不再
+        // 被上一份旧安装的位置带跑），静默升级就自己说清楚，否则会装到默认目录、变成两份。
+        var dir = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
+        var args = silent
+            ? $"/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /NOCANCEL /DIR=\"{dir}\""
+            : "";
         Process.Start(new ProcessStartInfo(setupPath, args) { UseShellExecute = true });
     }
 
