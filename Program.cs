@@ -6169,6 +6169,10 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
             for (int i = 0; i < 10; i++) Pump(app, 80);
             Save(spectrumWindow, Path.Combine(dir, "spectrum-window.png"));
             File.AppendAllText(Path.Combine(dir, "layout.txt"),
+                Environment.NewLine + "spectrum scroll: " + spectrumWindow.DebugScrollEnd());
+            for (int i = 0; i < 6; i++) Pump(app, 80);
+            Save(spectrumWindow, Path.Combine(dir, "spectrum-window-bottom.png"));
+            File.AppendAllText(Path.Combine(dir, "layout.txt"),
                 Environment.NewLine + "spectrum window: " + spectrumWindow.DebugState());
             File.AppendAllText(Path.Combine(dir, "layout.txt"),
                 Environment.NewLine + "spectrum live: " + spectrumWindow.DebugSetHeight(320));
@@ -6198,6 +6202,46 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
             Save(main, Path.Combine(dir, "spectrum-overlay.png"));
             spectrumWindow.Close();
             for (int i = 0; i < 4; i++) Pump(app, 60);
+        }
+
+        // QA: 量化分段（原版「段落」）+ 落点小点。柱子数据钉死，不依赖声音，截图后量像素。
+        if (args.Contains("--spectrum-peak"))
+        {
+            var specOptions = Services.SpectrumOptions.Current;
+            specOptions.Enabled = true;
+            specOptions.Layer = "overlay";
+            specOptions.Bars = 8;
+            specOptions.Mirror = false;
+            specOptions.Gap = 6;
+            specOptions.Height = 200;
+            specOptions.CornerRadius = 0;
+            specOptions.Opacity = 1;
+            specOptions.AutoGain = false;
+            specOptions.Color = "#FFFFFF";
+            specOptions.Ghost = true;
+            specOptions.GhostAlpha = 90;
+            specOptions.Peak = true;
+            specOptions.PeakThickness = 4;
+            specOptions.Steps = 20;
+            main.RefreshSpectrumPlacement();
+            // 20 档下 0.52→0.50, 0.97→0.95, 0.03→0.05, 0.61→0.60, 0.29→0.30, 0.75→0.75, 0.40→0.40, 0.88→0.90
+            Controls.SpectrumView.DebugFast = new[] { 0.52f, 0.97f, 0.03f, 0.61f, 0.29f, 0.75f, 0.40f, 0.88f };
+            Controls.SpectrumView.DebugSlow = new[] { 0.90f, 0.99f, 0.55f, 0.80f, 0.62f, 0.95f, 0.70f, 0.92f };
+            Controls.SpectrumView.RefreshAll();
+            for (int i = 0; i < 12; i++) Pump(app, 80);
+            Save(main, Path.Combine(dir, "spectrum-peak.png"));
+            specOptions.Steps = 0;
+            Controls.SpectrumView.RefreshAll();
+            for (int i = 0; i < 8; i++) Pump(app, 80);
+            Save(main, Path.Combine(dir, "spectrum-smooth.png"));
+            specOptions.Peak = false;
+            Controls.SpectrumView.RefreshAll();
+            for (int i = 0; i < 8; i++) Pump(app, 80);
+            Save(main, Path.Combine(dir, "spectrum-nopeak.png"));
+            File.AppendAllText(Path.Combine(dir, "layout.txt"),
+                Environment.NewLine + "spectrum peak: " + main.DebugSpectrumLayer() +
+                " steps=" + specOptions.Steps + " peak=" + specOptions.Peak +
+                " thickness=" + specOptions.PeakThickness);
         }
 
         // QA: open one tooltip so its themed look can be screenshotted (the stock WPF one is white).

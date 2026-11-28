@@ -89,6 +89,22 @@ public sealed class SpectrumSettings
     /// <summary>残影的不透明度（0..255）。</summary>
     public int GhostAlpha { get; set; } = 70;
 
+    /// <summary>
+    /// 落点（峰值小点）：柱子顶上那根按**慢衰减**下落的小横条。
+    /// 和残影不是一回事 —— 残影是变矮的一整根柱子，落点是脱开柱顶的一个小点，
+    /// 所以快回落时它会在柱子上面悬一下再掉下来。原版皮肤也是两路独立数据。
+    /// </summary>
+    public bool Peak { get; set; } = true;
+
+    /// <summary>落点粗细（DIP）。原版是 2 px 的小横条。</summary>
+    public double PeakThickness { get; set; } = 3;
+
+    /// <summary>
+    /// 量化级数。0/1 = 平滑（连续值，现在的手感）；20 = 原版「段落」，每档 5%。
+    /// 只量化实心柱 —— 残影和落点保持连续，原版同样是两路（mcalc 量化、Lcalc 原始）。
+    /// </summary>
+    public int Steps { get; set; } = 0;
+
     /// <summary>镜像布局：中间低频、两边高频。false = 从左到右由低到高。</summary>
     public bool Mirror { get; set; } = true;
 
@@ -165,6 +181,8 @@ public sealed class SpectrumSettings
         FastMs = double.IsNaN(FastMs) || FastMs < 20 ? 150 : Math.Min(2000, FastMs);
         SlowMs = double.IsNaN(SlowMs) || SlowMs < FastMs ? Math.Max(FastMs, 800) : Math.Min(4000, SlowMs);
         GhostAlpha = Math.Clamp(GhostAlpha <= 0 ? 70 : GhostAlpha, 0, 255);
+        PeakThickness = double.IsNaN(PeakThickness) || PeakThickness < 1 ? 3 : Math.Min(16, PeakThickness);
+        Steps = Math.Clamp(Steps, 0, 60);
         Layer = IsBackdrop ? "backdrop" : "overlay";
         PanelSeeThrough = Math.Clamp(PanelSeeThrough, 0, 80);
 

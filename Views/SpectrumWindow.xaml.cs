@@ -49,6 +49,10 @@ public partial class SpectrumWindow : Window
         Hook(sldFast, 20, 800, () => _settings.FastMs, v => _settings.FastMs = v, txtFast, " ms");
         Hook(sldSlow, 100, 2400, () => _settings.SlowMs, v => _settings.SlowMs = v, txtSlow, " ms");
         Hook(sldGhostAlpha, 0, 255, () => _settings.GhostAlpha, v => _settings.GhostAlpha = (int)Math.Round(v), txtGhostAlpha, "");
+        Hook(sldPeakThickness, 1, 16, () => _settings.PeakThickness, v => _settings.PeakThickness = v,
+            txtPeakThickness, " px", "0.#");
+        Hook(sldSteps, 0, 40, () => _settings.Steps, v => _settings.Steps = (int)Math.Round(v), txtSteps, "", "0",
+            v => v < 2 ? "平滑" : $"{v:0} 段");
 
         BindSwitch(chkEnabled, () => _settings.Enabled, v => _settings.Enabled = v);
         BindSwitch(chkOwnAudio, () => _settings.OwnAudioOnly, v => _settings.OwnAudioOnly = v);
@@ -57,6 +61,7 @@ public partial class SpectrumWindow : Window
         BindSwitch(chkAutoGain, () => _settings.AutoGain, v => _settings.AutoGain = v);
         BindSwitch(chkMirror, () => _settings.Mirror, v => _settings.Mirror = v);
         BindSwitch(chkGhost, () => _settings.Ghost, v => _settings.Ghost = v);
+        BindSwitch(chkPeak, () => _settings.Peak, v => _settings.Peak = v);
 
         txtColor.Text = _settings.Color;
         RebuildSwatches();
@@ -207,6 +212,27 @@ public partial class SpectrumWindow : Window
             byte.TryParse(hex.AsSpan(4, 2), NumberStyles.HexNumber, null, out var b))
             return Color.FromRgb(r, g, b);
         return Color.FromRgb(0xC7, 0x7D, 0xFF);
+    }
+
+    /// <summary>QA：滚到最底部（截图验证下面几张卡片，尤其是新增的落点/量化）。</summary>
+    internal string DebugScrollEnd()
+    {
+        var viewer = FindScroll(this);
+        if (viewer == null) return "no-scrollviewer";
+        viewer.ScrollToEnd();
+        return $"offset={viewer.VerticalOffset:0}/{viewer.ScrollableHeight:0}";
+    }
+
+    private static ScrollViewer? FindScroll(DependencyObject root)
+    {
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            if (child is ScrollViewer viewer) return viewer;
+            var found = FindScroll(child);
+            if (found != null) return found;
+        }
+        return null;
     }
 
     /// <summary>QA：报当前参数。</summary>

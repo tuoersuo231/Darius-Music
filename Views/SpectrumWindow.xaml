@@ -61,6 +61,13 @@
               <TextBlock Text="画残影" FontSize="13" VerticalAlignment="Center" />
               <CheckBox x:Name="chkGhost" Style="{StaticResource Switch}" HorizontalAlignment="Right" VerticalAlignment="Center" />
             </Grid>
+            <Grid Margin="0,6">
+              <StackPanel VerticalAlignment="Center" Margin="0,0,86,0">
+                <TextBlock Text="落点（峰值小点）" FontSize="13" />
+                <TextBlock Text="柱子顶上那根慢慢下落的小横条，用的是慢衰减那一路的数据。" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,2,0,0" />
+              </StackPanel>
+              <CheckBox x:Name="chkPeak" Style="{StaticResource Switch}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+            </Grid>
           </StackPanel>
         </Border>
 
@@ -196,6 +203,20 @@
                 <TextBlock x:Name="txtGhostAlpha" HorizontalAlignment="Right" FontSize="12" Foreground="{DynamicResource AccentBrush}" />
               </Grid>
               <controls:DragOnlySlider x:Name="sldGhostAlpha" Style="{StaticResource ThinSlider}" Margin="0,6,0,0" />
+            </StackPanel>
+            <StackPanel Margin="0,8">
+              <Grid>
+                <TextBlock Text="落点粗细" FontSize="13" />
+                <TextBlock x:Name="txtPeakThickness" HorizontalAlignment="Right" FontSize="12" Foreground="{DynamicResource AccentBrush}" />
+              </Grid>
+              <controls:DragOnlySlider x:Name="sldPeakThickness" Style="{StaticResource ThinSlider}" Margin="0,6,0,0" />
+            </StackPanel>
+            <StackPanel Margin="0,8,0,10">
+              <Grid>
+                <TextBlock Text="量化分段（0 = 平滑）" FontSize="13" />
+                <TextBlock x:Name="txtSteps" HorizontalAlignment="Right" FontSize="12" Foreground="{DynamicResource AccentBrush}" />
+              </Grid>
+              <controls:DragOnlySlider x:Name="sldSteps" Style="{StaticResource ThinSlider}" Margin="0,6,0,0" />
             </StackPanel>
           </StackPanel>
         </Border>

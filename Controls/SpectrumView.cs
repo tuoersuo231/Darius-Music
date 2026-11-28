@@ -26,9 +26,19 @@ public sealed class SpectrumView : FrameworkElement
 
     private SolidColorBrush? _fill;
     private SolidColorBrush? _ghost;
+    private SolidColorBrush? _peak;
     private Color _cachedFill = Colors.Transparent;
     private double _cachedAlpha = -1;
     private int _cachedGhostAlpha = -1;
+    private Color _cachedPeak = Colors.Transparent;
+    private double _cachedPeakAlpha = -1;
+
+    /// <summary>
+    /// QA 用：把两路柱子数据钉死。没有声音的机器上也能稳定截图、量像素，
+    /// 验证"落点"画在哪、"段落"到底量化了几档。只在 --spectrum-peak 里赋值。
+    /// </summary>
+    internal static float[]? DebugFast;
+    internal static float[]? DebugSlow;
 
     private bool _running;
     private DispatcherTimer? _timer;
@@ -183,9 +193,18 @@ public sealed class SpectrumView : FrameworkElement
             _cachedGhostAlpha = ghostAlpha;
             _ghost = Freeze(Color.FromArgb((byte)Math.Round(ghostAlpha / 255.0 * alpha * 255), drawn.R, drawn.G, drawn.B));
         }
+        // 落点要比柱子实一点，否则调低透明度之后它就糊在残影里看不见了。
+        double peakAlpha = Math.Clamp(Math.Max(alpha, 0.9), 0.05, 1);
+        Color peakDrawn = Unmix(color, panel, peakAlpha);
+        if (_peak == null || peakDrawn != _cachedPeak || peakAlpha != _cachedPeakAlpha)
+        {
+            _cachedPeak = peakDrawn;
+            _cachedPeakAlpha = peakAlpha;
+            _peak = Freeze(Color.FromArgb((byte)Math.Round(peakAlpha * 255), peakDrawn.R, peakDrawn.G, peakDrawn.B));
+        }
 
-        var fast = _service.Read();
-        var slow = _service.Read(true);
+        var fast = DebugFast ?? _service.Read();
+        var slow = DebugSlow ?? _service.Read(true);
         // 频段数可能少于柱子数：镜像模式下左右两半共用同一组频段。
         int bands = fast.Length;
         int count = Math.Max(1, options.Mirror ? options.Bars : bands);
@@ -196,6 +215,9 @@ public sealed class SpectrumView : FrameworkElement
         double totalGap = gap * (count - 1);
         double barWidth = Math.Max(1.0, (width - totalGap) / count);
         bool mirrored = options.Mirror;
+        // 量化档数（0/1 = 平滑）。原版「段落」就是 round(v*20)/20，只作用在实心柱上。
+        int steps = Math.Clamp(options.Steps, 0, 60);
+        double thickness = Math.Clamp(options.PeakThickness, 1, 16);
 
         for (int i = 0; i < count; i++)
         {
@@ -212,13 +234,24 @@ public sealed class SpectrumView : FrameworkElement
             source = Math.Clamp(source, 0, bands - 1);
 
             double x = i * (barWidth + gap);
-            double solid = height * fast[source];
+            double value = fast[source];
+            if (steps > 1) value = Math.Round(value * steps) / steps;
+            double solid = height * value;
             double ghost = options.Ghost ? height * slow[source] : 0;
 
             if (ghost > solid + 0.5)
                 DrawBar(dc, _ghost!, x, barWidth, height, ghost - solid, solid, radius);
             if (solid > 0.5)
                 DrawBar(dc, _fill!, x, barWidth, height, solid, 0, radius);
+
+            // 落点：慢衰减那一路的顶端。快回落时它和柱子脱开，看起来就是一颗往下掉的峰值点。
+            if (options.Peak && slow[source] > 0.002)
+            {
+                double top = height - height * slow[source];
+                double peakHeight = Math.Min(thickness, height - top);
+                if (peakHeight > 0.5)
+                    dc.DrawRectangle(_peak!, null, new Rect(x, top, barWidth, peakHeight));
+            }
         }
     }
 
