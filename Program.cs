@@ -6307,6 +6307,15 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
                 $"view='{controller.PlaylistInView?.Name}' tracks={controller.PlaylistInView?.Songs.Count}");
             File.AppendAllText(Path.Combine(dir, "layout.txt"), Environment.NewLine + "  " + first);
             File.AppendAllText(Path.Combine(dir, "layout.txt"), Environment.NewLine + "  " + second);
+            var downloadDir = Arg(args, "--download-dir");
+            if (downloadDir != null)
+            {
+                controller.Settings.DownloadFolder = downloadDir;
+                File.AppendAllText(Path.Combine(dir, "layout.txt"),
+                    Environment.NewLine + "reuse: id=777001 -> '" + (controller.FindDownloadedPath(777001) ?? "(null)") +
+                    "'  id=100001 -> '" + (controller.FindDownloadedPath(100001) ?? "(null)") +
+                    "'  id=999999 -> '" + (controller.FindDownloadedPath(999999) ?? "(null)") + "'");
+            }
         }
 
         // QA: open one tooltip so its themed look can be screenshotted (the stock WPF one is white).

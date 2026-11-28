@@ -993,10 +993,19 @@ public partial class MainWindow : Window
                 return $"already in '{existing.Name}'";
             }
             _player.SetNotice($"正在下载「{song.DisplayTitle}」并加入歌单…");
-            if (!await _player.DownloadSongAsync(song))
-                return "download failed: " + (_player.Notice ?? "未知原因");
-            path = _player.LastDownloadPath;
-            if (path == null) return "download produced no file";
+            // 同一首歌之前下过就直接用那份文件：不再重下，也不会在下载目录里多出一个 "(2)"。
+            path = _player.FindDownloadedPath(song.NeteaseId);
+            if (path != null)
+            {
+                _player.SetNotice($"「{song.DisplayTitle}」已经在下载目录里，直接加入…");
+            }
+            else
+            {
+                if (!await _player.DownloadSongAsync(song))
+                    return "download failed: " + (_player.Notice ?? "未知原因");
+                path = _player.LastDownloadPath;
+                if (path == null) return "download produced no file";
+            }
         }
 
         var (playlist, created, added) = AddPathToPlaylist(path, target);

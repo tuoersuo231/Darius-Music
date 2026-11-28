@@ -230,6 +230,28 @@ public sealed class PlayerController : IDisposable
         return playlist.Songs.Any(path => IdTag(path) == neteaseId.ToString());
     }
 
+    /// <summary>
+    /// 下载目录里已经躺着这首歌（同一个网易云 id）就用那份，不再下一遍：删掉再加、或者换个歌单加
+    /// 同一首，都不该在硬盘上堆出 "…[id] (2).mp3"、"…[id] (3).mp3"（用户：删了再加末尾数字会变）。
+    /// </summary>
+    public string? FindDownloadedPath(long neteaseId)
+    {
+        if (neteaseId <= 0) return null;
+        try
+        {
+            var folder = Settings.ResolvedDownloadFolder;
+            if (string.IsNullOrEmpty(folder) || !Directory.Exists(folder)) return null;
+            var id = neteaseId.ToString();
+            foreach (var file in Directory.EnumerateFiles(folder))
+            {
+                if (!TagReader.IsAudio(file)) continue;
+                if (IdTag(file) == id) return file;
+            }
+        }
+        catch { }
+        return null;
+    }
+
     public BitmapSource? ResolvePlaylistCover(Playlist playlist)
     {
         if (!string.IsNullOrEmpty(playlist.CoverPath))
