@@ -972,6 +972,8 @@ public partial class MainWindow : Window
     private async Task<string> AddSelectedToPlaylistAsync(Playlist? target)
     {
         if (lstSongs.SelectedItem is not Song song) return "nothing selected";
+        var totalClock = System.Diagnostics.Stopwatch.StartNew();
+        long downloadMs = 0;
         // No playlists at all: make 默认歌单 right now, before the download below (which can take a
         // while or fail). "添加到歌单" with nothing to add to has to end in a playlist, not in a
         // message box telling the user to create one first.
@@ -993,11 +995,13 @@ public partial class MainWindow : Window
                 return $"already in '{existing.Name}'";
             }
             _player.SetNotice($"正在下载「{song.DisplayTitle}」并加入歌单…");
-            // 同一首歌之前下过就直接用那份文件：不再重下，也不会在下载目录里多出一个 "(2)"。
+            // 同一首歌本地已经有就直接用那份文件（歌单里登记过的、曲库里的、下载目录里的都算）。
+            // 无损一首 100~200 MB，重下一遍就是几十秒，这才是"加到歌单很慢"的主要来源。
+            var downloadClock = System.Diagnostics.Stopwatch.StartNew();
             path = _player.FindDownloadedPath(song.NeteaseId);
             if (path != null)
             {
-                _player.SetNotice($"「{song.DisplayTitle}」已经在下载目录里，直接加入…");
+                _player.SetNotice($"本地已经有「{song.DisplayTitle}」，直接加入…");
             }
             else
             {
@@ -1006,6 +1010,8 @@ public partial class MainWindow : Window
                 path = _player.LastDownloadPath;
                 if (path == null) return "download produced no file";
             }
+            downloadClock.Stop();
+            downloadMs = downloadClock.ElapsedMilliseconds;
         }
 
         var (playlist, created, added) = AddPathToPlaylist(path, target);
@@ -1017,8 +1023,24 @@ public partial class MainWindow : Window
         // Adding to the playlist that is open right now should show the new row immediately.
         if (added > 0 && ReferenceEquals(_player.PlaylistInView, playlist))
             await _player.ShowPlaylistAsync(playlist);
+        LogAddTiming(song, path, downloadMs, totalClock.ElapsedMilliseconds, added);
         return $"song='{song.DisplayTitle}' source={song.Source} target='{playlist.Name}' " +
                $"created={fresh} added={added} entries={playlist.Songs.Count} file='{System.IO.Path.GetFileName(path)}'";
+    }
+
+    /// <summary>加一首歌的耗时写进 data\add.log：慢了能一眼看出是"下载"还是"界面"。</summary>
+    private static void LogAddTiming(Song song, string? path, long downloadMs, long totalMs, int added)
+    {
+        try
+        {
+            var file = System.IO.Path.Combine(Services.AppPaths.DataDir, "add.log");
+            System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(file)!);
+            System.IO.File.AppendAllText(file,
+                $"{DateTime.Now:MM-dd HH:mm:ss} '{song.DisplayTitle}' id={song.NeteaseId} src={song.Source} " +
+                $"lookup+download={downloadMs}ms total={totalMs}ms added={added} " +
+                $"file='{System.IO.Path.GetFileName(path ?? "")}'{Environment.NewLine}");
+        }
+        catch { }
     }
 
     /// <summary>Menu and QA share this: a null target means "默认歌单", created on demand.</summary>

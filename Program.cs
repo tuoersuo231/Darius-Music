@@ -6316,6 +6316,21 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
                     "'  id=100001 -> '" + (controller.FindDownloadedPath(100001) ?? "(null)") +
                     "'  id=999999 -> '" + (controller.FindDownloadedPath(999999) ?? "(null)") + "'");
             }
+            var idsArg = Arg(args, "--find-ids");
+            if (idsArg != null)
+            {
+                var found = new List<string>();
+                var findClock = System.Diagnostics.Stopwatch.StartNew();
+                foreach (var text in idsArg.Split(','))
+                {
+                    if (!long.TryParse(text.Trim(), out var queryId)) continue;
+                    found.Add($"{queryId} -> '{controller.FindDownloadedPath(queryId) ?? "(null)"}'");
+                }
+                findClock.Stop();
+                found.Add($"lookups={findClock.Elapsed.TotalMilliseconds:0.00}ms");
+                File.AppendAllText(Path.Combine(dir, "layout.txt"),
+                    Environment.NewLine + "find: " + string.Join("   ", found));
+            }
         }
 
         // QA: open one tooltip so its themed look can be screenshotted (the stock WPF one is white).

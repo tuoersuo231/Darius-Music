@@ -231,25 +231,53 @@ public sealed class PlayerController : IDisposable
     }
 
     /// <summary>
-    /// 下载目录里已经躺着这首歌（同一个网易云 id）就用那份，不再下一遍：删掉再加、或者换个歌单加
-    /// 同一首，都不该在硬盘上堆出 "…[id] (2).mp3"、"…[id] (3).mp3"（用户：删了再加末尾数字会变）。
+    /// 本地已经有这首歌（同一个网易云 id）就用那份，不再下一遍。
+    ///
+    /// 以前只扫「下载目录」，但用户的歌经常被挪到别处（E:\音乐\好き 这种整理过的文件夹，或者
+    /// 手机同步过来的目录），于是明明硬盘上躺着 220 MB 的 flac，还是又下一遍 —— 这就是"加到歌单
+    /// 很慢"的真正原因。现在按「歌单里登记过的文件 → 手动加入曲库的文件 → 下载目录 → 曲库目录」
+    /// 的顺序找，前三个都是内存里的列表，只有最后一个会真的扫目录。
     /// </summary>
     public string? FindDownloadedPath(long neteaseId)
     {
         if (neteaseId <= 0) return null;
+        var id = neteaseId.ToString();
         try
         {
-            var folder = Settings.ResolvedDownloadFolder;
-            if (string.IsNullOrEmpty(folder) || !Directory.Exists(folder)) return null;
-            var id = neteaseId.ToString();
-            foreach (var file in Directory.EnumerateFiles(folder))
-            {
-                if (!TagReader.IsAudio(file)) continue;
+            foreach (var file in KnownAudioFiles())
                 if (IdTag(file) == id) return file;
+
+            // 最后才去曲库目录里按文件名找（一次目录遍历，比自己下一遍 200 MB 便宜太多）。
+            var library = (Settings.MusicFolder ?? "").Trim();
+            if (library.Length > 0 && Directory.Exists(library))
+            {
+                foreach (var file in Directory.EnumerateFiles(library, "*[" + id + "]*", SearchOption.AllDirectories))
+                    if (TagReader.IsAudio(file) && IdTag(file) == id) return file;
             }
         }
         catch { }
         return null;
+    }
+
+    /// <summary>程序已经知道的所有音频文件（内存里的清单，不扫盘）。</summary>
+    private IEnumerable<string> KnownAudioFiles()
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var playlist in Playlists)
+            foreach (var path in playlist.Songs)
+                if (!string.IsNullOrEmpty(path) && seen.Add(path)) yield return path;
+        foreach (var path in Settings.LibraryFiles ?? new List<string>())
+            if (!string.IsNullOrEmpty(path) && seen.Add(path)) yield return path;
+
+        var folder = Settings.ResolvedDownloadFolder;
+        if (!string.IsNullOrEmpty(folder) && Directory.Exists(folder))
+        {
+            foreach (var path in Directory.EnumerateFiles(folder))
+            {
+                if (!TagReader.IsAudio(path)) continue;
+                if (seen.Add(path)) yield return path;
+            }
+        }
     }
 
     public BitmapSource? ResolvePlaylistCover(Playlist playlist)
