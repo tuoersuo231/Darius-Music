@@ -1,5 +1,6 @@
-﻿using System.IO;
+using System.IO;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Windows.Media.Imaging;
 using CurrentLyrics.Models;
 
@@ -17,6 +18,51 @@ public static class TagReader
         AudioExtensions.Contains(System.IO.Path.GetExtension(path), StringComparer.OrdinalIgnoreCase);
 
     public static Song Read(string path)
+    {
+        // 打开一张歌单要把里面每个文件的标签都读一遍；加一首歌又要把整张单重读一遍。
+        // 网易云下载的 mp3 没有 ID3，光扫帧头算时长就要读几 MB，几百首就是好几秒的空白。
+        // 缓存键是"路径 + 修改时间 + 长度"，文件被替换会自动失效。
+        long stamp = 0;
+        try
+        {
+            var info = new FileInfo(path);
+            stamp = info.LastWriteTimeUtc.Ticks ^ info.Length;
+        }
+        catch { }
+        lock (Cache)
+        {
+            if (Cache.TryGetValue(path, out var hit) && hit.Stamp == stamp) return Clone(hit.Template);
+        }
+
+        var song = ReadCore(path);
+        lock (Cache)
+        {
+            Cache[path] = (stamp, song);
+            if (Cache.Count > 2048) Cache.Clear();
+        }
+        return Clone(song);
+    }
+
+    /// <summary>路径 → 已解析的标签。封面 BitmapSource 是 Freeze 过的，克隆之间共用同一份。</summary>
+    private static readonly Dictionary<string, (long Stamp, Song Template)> Cache =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    private static Song Clone(Song source) => new()
+    {
+        Source = source.Source,
+        Path = source.Path,
+        NeteaseId = source.NeteaseId,
+        Title = source.Title,
+        Artist = source.Artist,
+        Album = source.Album,
+        Duration = source.Duration,
+        CoverUrl = source.CoverUrl,
+        LyricsPath = source.LyricsPath,
+        AlbumId = source.AlbumId,
+        Cover = source.Cover,
+    };
+
+    private static Song ReadCore(string path)
     {
         var song = new Song { Path = path };
         try
@@ -44,6 +90,11 @@ public static class TagReader
 
             if (string.IsNullOrWhiteSpace(song.Title) || string.IsNullOrWhiteSpace(song.Artist))
                 ReadId3v1(fs, song);
+
+            // 没有时长标签的 mp3 很常见（我们下载回来的就是），没有它进度条只有 1 秒。
+            if (song.Duration <= TimeSpan.Zero &&
+                string.Equals(Path.GetExtension(path), ".mp3", StringComparison.OrdinalIgnoreCase))
+                EstimateMp3Duration(fs, song);
         }
         catch (Exception ex)
         {
@@ -92,9 +143,36 @@ public static class TagReader
         return null;
     }
 
+    /// <summary>我们自己的下载叫 <c>标题 - 歌手 [网易云id] (2).mp3</c>：id 是给歌词匹配用的，
+    /// "(2)" 是重名序号（老版本写在 id 后面，新版本写在 id 前面），两个都不属于歌名
+    /// （用户：在线加的歌曲末尾带一串数字，删了再加还会变）。</summary>
+    private static string StripDownloadSuffix(string name)
+    {
+        var text = name;
+        // "(2)" 只有在这种"确实是我们下载的文件"里才去掉：名字里出现过 [id]。
+        bool hadId = Regex.IsMatch(name, @"\[\d{4,}\]");
+        for (int guard = 0; guard < 4; guard++)
+        {
+            var counter = Regex.Match(text, @"\s*\(\d+\)$");
+            if (hadId && counter.Success && counter.Index > 0)
+            {
+                text = text[..counter.Index];
+                continue;
+            }
+            var id = Regex.Match(text, @"\s*\[\d{4,}\]$");
+            if (id.Success && id.Index > 0)
+            {
+                text = text[..id.Index];
+                continue;
+            }
+            break;
+        }
+        return text.Trim().Length == 0 ? name : text.TrimEnd();
+    }
+
     private static void ParseFromFileName(string path, Song song)
     {
-        var name = System.IO.Path.GetFileNameWithoutExtension(path);
+        var name = StripDownloadSuffix(System.IO.Path.GetFileNameWithoutExtension(path));
         var dash = name.IndexOf(" - ", StringComparison.Ordinal);
         if (dash > 0)
         {
@@ -105,6 +183,95 @@ public static class TagReader
         {
             song.Title = name.Trim();
         }
+    }
+
+    // ---------- MP3 时长（没有 TLEN 的文件） ----------
+
+    /// <summary>
+    /// 从 mp3 码流里算时长：先找第一帧头，优先读 Xing/Info 里的帧数（VBR 也准），没有就按 CBR 用
+    /// 码率估。不这么做的话 song.Duration 是 0，进度条 Maximum 退化成 1 秒 —— 一按播放滑块就顶到
+    /// 最右边，而时间文字显示的是媒体自己报的 5:49（用户报的就是这个）。
+    /// </summary>
+    private static void EstimateMp3Duration(FileStream fs, Song song)
+    {
+        try
+        {
+            long length = fs.Length;
+            if (length < 4096) return;
+            int cap = (int)Math.Min(length, 256 * 1024);
+            var buffer = new byte[cap];
+            fs.Position = 0;
+            int n = fs.Read(buffer, 0, cap);
+
+            for (int i = 0; i + 4 < n; i++)
+            {
+                if (buffer[i] != 0xFF || (buffer[i + 1] & 0xE0) != 0xE0) continue;
+                if (!TryMp3Frame(buffer, i, n, out var frame)) continue;
+                // ID3 标签里也可能蹦出 0xFF 0xEx：要求下一帧也正好落在算出来的位置上才算数。
+                int next = i + frame.Length;
+                if (next + 4 < n && !TryMp3Frame(buffer, next, n, out _)) continue;
+
+                int xing = i + 4 + frame.SideInfo;
+                if (xing + 12 <= n)
+                {
+                    var tag = Encoding.ASCII.GetString(buffer, xing, 4);
+                    if (tag is "Xing" or "Info")
+                    {
+                        int flags = buffer[xing + 4] << 24 | buffer[xing + 5] << 16 | buffer[xing + 6] << 8 | buffer[xing + 7];
+                        if ((flags & 1) != 0)
+                        {
+                            long frames = ((long)buffer[xing + 8] << 24) | ((long)buffer[xing + 9] << 16) |
+                                          ((long)buffer[xing + 10] << 8) | buffer[xing + 11];
+                            if (frames > 0 && frame.SampleRate > 0)
+                            {
+                                song.Duration = TimeSpan.FromSeconds((double)frames * frame.Samples / frame.SampleRate);
+                                return;
+                            }
+                        }
+                    }
+                }
+
+                // CBR：整段字节数 ÷ 码率。
+                double seconds = (length - i) * 8.0 / frame.Bitrate;
+                if (seconds > 0.5 && seconds < 6 * 3600) song.Duration = TimeSpan.FromSeconds(seconds);
+                return;
+            }
+        }
+        catch { }
+    }
+
+    /// <summary>MPEG Layer III 帧头解出来的东西。Bitrate 是 bit/s，Length 是整帧字节数。</summary>
+    private readonly record struct Mp3Frame(int Bitrate, int SampleRate, int Length, int SideInfo, int Samples);
+
+    private static readonly int[] BitratesMpeg1 = { 0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320 };
+    private static readonly int[] BitratesMpeg2 = { 0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160 };
+    private static readonly int[] RatesMpeg1 = { 44100, 48000, 32000 };
+    private static readonly int[] RatesMpeg2 = { 22050, 24000, 16000 };
+    private static readonly int[] RatesMpeg25 = { 11025, 12000, 8000 };
+
+    private static bool TryMp3Frame(byte[] buffer, int at, int length, out Mp3Frame frame)
+    {
+        frame = default;
+        if (at + 4 > length) return false;
+        if (buffer[at] != 0xFF || (buffer[at + 1] & 0xE0) != 0xE0) return false;
+        int version = (buffer[at + 1] >> 3) & 3;       // 0 = 2.5, 2 = 2, 3 = 1
+        int layer = (buffer[at + 1] >> 1) & 3;         // 1 = Layer III
+        int bitrateIndex = (buffer[at + 2] >> 4) & 0x0F;
+        int sampleIndex = (buffer[at + 2] >> 2) & 3;
+        int padding = (buffer[at + 2] >> 1) & 1;
+        int channelMode = (buffer[at + 3] >> 6) & 3;   // 3 = 单声道
+        if (version == 1 || layer != 1 || bitrateIndex is 0 or 15 || sampleIndex == 3) return false;
+
+        bool mpeg1 = version == 3;
+        int kbps = (mpeg1 ? BitratesMpeg1 : BitratesMpeg2)[bitrateIndex];
+        int rate = (version switch { 3 => RatesMpeg1, 2 => RatesMpeg2, _ => RatesMpeg25 })[sampleIndex];
+        int samples = mpeg1 ? 1152 : 576;
+        int frameLength = samples / 8 * kbps * 1000 / rate + padding;
+        if (frameLength < 24) return false;
+        // Xing 头跟在帧头和 side info 之后。
+        int sideInfo = mpeg1 ? (channelMode == 3 ? 17 : 32) : (channelMode == 3 ? 9 : 17);
+        frame = new Mp3Frame(kbps * 1000, rate, frameLength, sideInfo, samples);
+        return true;
     }
 
     // ---------- ID3v2 ----------

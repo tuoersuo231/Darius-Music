@@ -2278,6 +2278,16 @@ public partial class MainWindow : Window
         if (total <= 0) return;
         // While the user holds the thumb, playback must not drag the value back under the cursor.
         if (_seeking) return;
+        // 文件的时长标签可能不存在（网易云下载的 mp3 就没有），OnTrackChanged 里 Maximum 会退化成
+        // 1 秒，于是刚开始播放滑块就顶到最右。以媒体自己报的时长为准，差超过 1.5 秒就纠正回来。
+        double realTotal = total / 1000.0;
+        if (Math.Abs(sldProgress.Maximum - realTotal) > 1.5)
+        {
+            sldProgress.Maximum = realTotal;
+            if (_player.Current is { } song &&
+                Math.Abs((song.Duration - TimeSpan.FromMilliseconds(total)).TotalSeconds) > 1.5)
+                song.Duration = TimeSpan.FromMilliseconds(total);
+        }
         sldProgress.Value = Math.Clamp(positionMs / 1000, 0, total / 1000);
         txtPos.Text = FormatTime(positionMs / 1000);
         txtDur.Text = FormatTime(total / 1000);

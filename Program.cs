@@ -148,6 +148,11 @@ public static class Program
             RunProcessLoopbackTest(args);
             return;
         }
+        if (args.Contains("--tagbench"))
+        {
+            RunTagBench(args);
+            return;
+        }
         if (args.Contains("--source-audit"))
         {
             RunSourceAudit(args, settings);
@@ -3091,6 +3096,41 @@ public static class Program
         File.WriteAllLines(Arg(args, "--report") ?? "pl-test.txt", lines);
     }
 
+    /// <summary>QA: tag-read cost for a folder (cold vs cached) plus what the reader made of each file.</summary>
+    private static void RunTagBench(string[] args)
+    {
+        var dir = Arg(args, "--tagbench");
+        if (dir == null || !Directory.Exists(dir))
+        {
+            Console.WriteLine("usage: --tagbench <dir with *.mp3>");
+            return;
+        }
+        var files = Directory.GetFiles(dir, "*.mp3").OrderBy(f => f, StringComparer.Ordinal).ToArray();
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var cold = files.Select(Services.TagReader.Read).ToArray();
+        double coldMs = clock.Elapsed.TotalMilliseconds;
+        clock.Restart();
+        var warm = files.Select(Services.TagReader.Read).ToArray();
+        double warmMs = clock.Elapsed.TotalMilliseconds;
+        var lines = new List<string>
+        {
+            $"files={files.Length} coldMs={coldMs:0.0} ({coldMs / Math.Max(1, files.Length):0.00} ms/file) " +
+            $"warmMs={warmMs:0.0} ({warmMs / Math.Max(1, files.Length):0.00} ms/file) " +
+            $"speedup={coldMs / Math.Max(0.01, warmMs):0.0}x",
+        };
+        foreach (var s in cold.Take(5))
+            lines.Add($"  file='{s.FileName}' title='{s.DisplayTitle}' artist='{s.DisplayArtist}' " +
+                      $"dur={s.DurationText} ({s.Duration.TotalSeconds:0.00}s) " +
+                      $"netease={Services.PlayerController.GuessNeteaseIdFromPath(s.Path)}");
+        foreach (var line in lines) Console.WriteLine(line);
+        try
+        {
+            File.WriteAllText(Path.Combine(Path.GetFullPath(dir), "tagbench.txt"),
+                string.Join(Environment.NewLine, lines) + Environment.NewLine);
+        }
+        catch { }
+    }
+
     private static void RunSpectrumTest(string[] args, AppSettings settings)    {
         var lines = new List<string>();
         long id = long.TryParse(Arg(args, "--id"), out var parsed) ? parsed : 496869422L;
@@ -5587,6 +5627,7 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
         Pump(app, 700);
 
         var lines = new List<string> { "menu: " + main.DebugAddPlaylistMenu() };
+        lines.Add("palette: " + Services.Palette.Describe());
         lines.Add("open: " + main.DebugOpenSongMenu());
         Pump(app, 1000);
 
@@ -6242,6 +6283,30 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
                 Environment.NewLine + "spectrum peak: " + main.DebugSpectrumLayer() +
                 " steps=" + specOptions.Steps + " peak=" + specOptions.Peak +
                 " thickness=" + specOptions.PeakThickness);
+        }
+
+        // QA: 添加到歌单的耗时（本地行，不含网络下载），验证标签缓存把"加一首歌"从整表重读里解放出来。
+        if (args.Contains("--playlist-add"))
+        {
+            RunBlocking(app, controller.ShowLibraryAsync());
+            for (int i = 0; i < 8; i++) Pump(app, 60);
+            var addClock = System.Diagnostics.Stopwatch.StartNew();
+            main.DebugSelectRow(0);
+            var firstTask = main.DebugAddSelectedToPlaylist(null);
+            RunBlocking(app, firstTask);
+            double add1 = addClock.Elapsed.TotalMilliseconds;
+            addClock.Restart();
+            main.DebugSelectRow(1);
+            var secondTask = main.DebugAddSelectedToPlaylist(null);
+            RunBlocking(app, secondTask);
+            double add2 = addClock.Elapsed.TotalMilliseconds;
+            string first = firstTask.IsCompletedSuccessfully ? firstTask.Result : "?";
+            string second = secondTask.IsCompletedSuccessfully ? secondTask.Result : "?";
+            File.AppendAllText(Path.Combine(dir, "layout.txt"),
+                Environment.NewLine + $"playlist add: rows={controller.Songs.Count} first={add1:0}ms second={add2:0}ms " +
+                $"view='{controller.PlaylistInView?.Name}' tracks={controller.PlaylistInView?.Songs.Count}");
+            File.AppendAllText(Path.Combine(dir, "layout.txt"), Environment.NewLine + "  " + first);
+            File.AppendAllText(Path.Combine(dir, "layout.txt"), Environment.NewLine + "  " + second);
         }
 
         // QA: open one tooltip so its themed look can be screenshotted (the stock WPF one is white).

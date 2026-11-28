@@ -1124,11 +1124,10 @@ public sealed class PlayerController : IDisposable
     {
         if (string.IsNullOrEmpty(path)) return 0;
         var stem = System.IO.Path.GetFileNameWithoutExtension(path);
-        int open = stem.LastIndexOf('[');
-        if (open < 0 || open >= stem.Length - 2 || stem[^1] != ']') return 0;
-        var digits = stem[(open + 1)..^1];
-        if (digits.Length < 5 || !digits.All(char.IsAsciiDigit)) return 0;
-        return long.TryParse(digits, out var id) ? id : 0;
+        // 老版本把重名序号写在 id 后面（"… [123] (2).mp3"），新版本写在前面：两种都要认。
+        var match = System.Text.RegularExpressions.Regex.Match(stem, @"\[(\d{5,})\](?:\s*\(\d+\))?$");
+        if (!match.Success) return 0;
+        return long.TryParse(match.Groups[1].Value, out var id) ? id : 0;
     }
 
     /// <summary>

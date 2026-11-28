@@ -972,12 +972,15 @@ public sealed class NowPlayingView : Grid
         // redo while the modal move loop sits on this same thread. SetWindowDragHold() catches the
         // page up in one go when the loop ends.
         if (_dragHold) return;
+        long total = (long)Math.Max(0, _player.Playback.DurationMs);
+        // 没有时长标签的文件（网易云下载的 mp3）Maximum 只有 1 秒，滑块一播放就顶满；以媒体为准。
+        if (total > 0 && Math.Abs(_progress.Maximum - total / 1000.0) > 1.5)
+            _progress.Maximum = total / 1000.0;
         if (!_dragging)
         {
             _progress.Value = Math.Clamp(positionMs / 1000, 0, _progress.Maximum);
             _posText.Text = FormatTime(positionMs / 1000);
         }
-        long total = (long)Math.Max(0, _player.Playback.DurationMs);
         if (total > 0 && _player.Current != null)
         {
             // Remaining time, like the reference player ("-5:02"), not the total.

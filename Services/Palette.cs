@@ -137,6 +137,10 @@ public static class Palette
         Set(resources, "CardBrush", Solid(WithAlpha(card, plate)));
         Set(resources, "SurfaceBrush", Solid(WithAlpha(card, plate)));
         Set(resources, "SurfaceRaisedBrush", Solid(WithAlpha(panel, plate)));
+        // 菜单、下拉列表、提示都是**独立的分层窗口**：整块像素 alpha=0 时 Windows 会把点击透传到
+        // 下面的窗口（用户：全透明背景下右键菜单必须精准点到文字笔画才生效）。给它们留 1/255 的
+        // 底 —— 肉眼看不出来，但那一块不再是"完全透明"，点击就落在菜单上。
+        Set(resources, "PopupBrush", Solid(WithAlpha(panel, Math.Max(plate, (byte)1))));
         Set(resources, "InsetBrush", Solid(WithAlpha(inset, plate)));
         // No hairlines anywhere (user request, 1.2.66): the app is meant to read as floating text and
         // artwork, with or without a background colour. Structure comes from spacing, not from rules.
@@ -237,7 +241,7 @@ public static class Palette
     {
         var resources = Application.Current?.Resources;
         if (resources == null) return "";
-        var keys = new[] { "WindowBrush", "SidebarBrush", "CardBrush", "SurfaceRaisedBrush", "InsetBrush", "RowHoverBrush", "RowSelectedBrush", "NavActiveBrush", "TextBrush", "AccentSoftBrush", "HairlineBrush" };
+        var keys = new[] { "WindowBrush", "SidebarBrush", "CardBrush", "SurfaceRaisedBrush", "PopupBrush", "InsetBrush", "RowHoverBrush", "RowSelectedBrush", "NavActiveBrush", "TextBrush", "AccentSoftBrush", "HairlineBrush" };
         var parts = new List<string>();
         foreach (var key in keys)
             parts.Add(key + "=" + (resources[key] is SolidColorBrush brush ? brush.Color.ToString() : "?"));

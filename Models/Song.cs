@@ -27,7 +27,21 @@ public sealed class Song : INotifyPropertyChanged
     public string Title { get; set; } = "";
     public string Artist { get; set; } = "";
     public string Album { get; set; } = "";
-    public TimeSpan Duration { get; set; }
+    /// <summary>Length of the track. A file with no duration tag reads as 0 until the media pipeline
+    /// reports the real one, and the row has to refresh when that happens.</summary>
+    public TimeSpan Duration
+    {
+        get => _duration;
+        set
+        {
+            if (_duration == value) return;
+            _duration = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(DurationText));
+        }
+    }
+
+    private TimeSpan _duration;
     public string? CoverUrl { get; set; }
     public string? StreamUrl { get; set; }
     /// <summary>Quality level the cached StreamUrl was resolved for.</summary>

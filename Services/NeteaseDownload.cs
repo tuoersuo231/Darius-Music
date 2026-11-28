@@ -160,8 +160,18 @@ public static class NeteaseDownload
     {
         var path = Path.Combine(folder, name + "." + ext);
         for (int i = 2; File.Exists(path); i++)
-            path = Path.Combine(folder, $"{name} ({i}).{ext}");
+            path = Path.Combine(folder, WithCounter(name, i) + "." + ext);
         return path;
+    }
+
+    /// <summary>" (2)" 要插在 "[id]" **前面**：id 必须留在最后，否则重名文件就认不出是哪首
+    /// （歌词匹配、重复检测都靠这个后缀），而标题里也不该出现它。</summary>
+    private static string WithCounter(string name, int counter)
+    {
+        int open = name.LastIndexOf('[');
+        return open > 0 && name.EndsWith("]", StringComparison.Ordinal)
+            ? name[..open].TrimEnd() + $" ({counter}) " + name[open..]
+            : name + $" ({counter})";
     }
 
     private static string? DetectFormat(string file)
