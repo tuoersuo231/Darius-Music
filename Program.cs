@@ -6316,6 +6316,38 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
                     "'  id=100001 -> '" + (controller.FindDownloadedPath(100001) ?? "(null)") +
                     "'  id=999999 -> '" + (controller.FindDownloadedPath(999999) ?? "(null)") + "'");
             }
+            var cloudArg = Arg(args, "--cloud-add");
+            if (cloudArg != null && long.TryParse(cloudArg, out var cloudIdArg))
+            {
+                // 造一首"在线曲目"，验证加歌是瞬时且不下载：歌单只留 id + 元数据。
+                var cloudSong = new Models.Song
+                {
+                    Source = Models.SongSource.Netease,
+                    Path = "netease:" + cloudIdArg,
+                    NeteaseId = cloudIdArg,
+                    Title = "云端测试曲",
+                    Artist = "测试歌手",
+                    Album = "测试专辑",
+                    Duration = TimeSpan.FromSeconds(213),
+                    CoverUrl = "https://example.invalid/cover.jpg",
+                };
+                var cloudClock = System.Diagnostics.Stopwatch.StartNew();
+                var cloudPlaylist = controller.CreatePlaylist("云端歌单");
+                int cloudAdded = controller.AddCloudToPlaylist(cloudPlaylist, cloudSong);
+                double cloudAddMs = cloudClock.Elapsed.TotalMilliseconds;
+                cloudClock.Restart();
+                RunBlocking(app, controller.ShowPlaylistAsync(cloudPlaylist));
+                double cloudOpenMs = cloudClock.Elapsed.TotalMilliseconds;
+                for (int i = 0; i < 6; i++) Pump(app, 60);
+                var cloudRow = controller.Songs.FirstOrDefault();
+                File.AppendAllText(Path.Combine(dir, "layout.txt"),
+                    Environment.NewLine +
+                    $"cloud add: added={cloudAdded} addMs={cloudAddMs:0.0} openMs={cloudOpenMs:0.0} " +
+                    $"rows={controller.Songs.Count} row0='{cloudRow?.DisplayTitle}' artist='{cloudRow?.DisplayArtist}' " +
+                    $"dur={cloudRow?.DurationText} src={cloudRow?.Source} id={cloudRow?.NeteaseId} " +
+                    $"cover={(cloudRow?.CoverUrl != null)} entry='{cloudRow?.Path}'");
+                Save(main, Path.Combine(dir, "cloud-playlist.png"));
+            }
             var idsArg = Arg(args, "--find-ids");
             if (idsArg != null)
             {

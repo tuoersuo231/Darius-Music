@@ -994,24 +994,27 @@ public partial class MainWindow : Window
                 _player.SetNotice($"「{existing.Name}」里已有这首");
                 return $"already in '{existing.Name}'";
             }
-            _player.SetNotice($"正在下载「{song.DisplayTitle}」并加入歌单…");
-            // 同一首歌本地已经有就直接用那份文件（歌单里登记过的、曲库里的、下载目录里的都算）。
-            // 无损一首 100~200 MB，重下一遍就是几十秒，这才是"加到歌单很慢"的主要来源。
+            // 本地已经有这首（任意文件夹：歌单里登记过的、曲库里的、下载目录里的）→ 直接挂那个文件，
+            // 离线也能听，音质还是本地那份。
             var downloadClock = System.Diagnostics.Stopwatch.StartNew();
             path = _player.FindDownloadedPath(song.NeteaseId);
-            if (path != null)
-            {
-                _player.SetNotice($"本地已经有「{song.DisplayTitle}」，直接加入…");
-            }
-            else
-            {
-                if (!await _player.DownloadSongAsync(song))
-                    return "download failed: " + (_player.Notice ?? "未知原因");
-                path = _player.LastDownloadPath;
-                if (path == null) return "download produced no file";
-            }
             downloadClock.Stop();
             downloadMs = downloadClock.ElapsedMilliseconds;
+            if (path == null)
+            {
+                // 本地没有 → 只写歌单条目（id + 元数据），**不下载**。要听的时候才联网取流，
+                // 这就是用户要的"等到播放时再缓存"。
+                var (cloudPlaylist, cloudCreated) = AddCloudToPlaylist(song, target);
+                RefreshPlaylists();
+                bool cloudFresh = cloudCreated || createdDefault;
+                _player.SetNotice($"已添加到「{cloudPlaylist.Name}」" + (cloudFresh ? "（新建）" : "") + " · 播放时联网");
+                if (ReferenceEquals(_player.PlaylistInView, cloudPlaylist))
+                    await _player.ShowPlaylistAsync(cloudPlaylist);
+                LogAddTiming(song, null, downloadMs, totalClock.ElapsedMilliseconds, 1);
+                return $"song='{song.DisplayTitle}' source={song.Source} target='{cloudPlaylist.Name}' " +
+                       $"created={cloudFresh} added=1 entries={cloudPlaylist.Songs.Count} cloud={song.NeteaseId}";
+            }
+            _player.SetNotice($"本地已经有「{song.DisplayTitle}」，直接加入…");
         }
 
         var (playlist, created, added) = AddPathToPlaylist(path, target);
@@ -1041,6 +1044,23 @@ public partial class MainWindow : Window
                 $"file='{System.IO.Path.GetFileName(path ?? "")}'{Environment.NewLine}");
         }
         catch { }
+    }
+
+    /// <summary>在线曲目只登记 id + 元数据，不下载。</summary>
+    private (Playlist playlist, bool created) AddCloudToPlaylist(Song song, Playlist? target)
+    {
+        bool created = false;
+        if (target == null)
+        {
+            target = _player.Playlists.FirstOrDefault(p => p.Name == "默认歌单");
+            if (target == null)
+            {
+                target = _player.CreatePlaylist("默认歌单");
+                created = true;
+            }
+        }
+        _player.AddCloudToPlaylist(target, song);
+        return (target, created);
     }
 
     /// <summary>Menu and QA share this: a null target means "默认歌单", created on demand.</summary>

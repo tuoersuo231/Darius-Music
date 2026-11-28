@@ -97,15 +97,17 @@ public sealed class PlayerController : IDisposable
     public void RefreshPlaylistCounts()
     {
         foreach (var playlist in Playlists)
-            playlist.ExistingCount = playlist.Songs.Count(File.Exists);
+            playlist.ExistingCount = playlist.Songs.Count(p => Playlist.IsCloud(p) || File.Exists(p));
     }
 
     /// <summary>Drops the paths whose file is gone. Returns how many entries were removed.</summary>
     public int CleanMissing(Playlist playlist)
     {
         int before = playlist.Songs.Count;
-        playlist.Songs.RemoveAll(path => !File.Exists(path));
+        // 在线条目没有本地文件，别当成"失效"删掉。
+        playlist.Songs.RemoveAll(path => !Playlist.IsCloud(path) && !File.Exists(path));
         int removed = before - playlist.Songs.Count;
+        PruneCloudMetadata(playlist);
         if (removed == 0) return 0;
         if (playlist.CoverImage == null) playlist.CoverImage = ResolvePlaylistCover(playlist);
         PlaylistStore.Save(Playlists);
@@ -198,17 +200,61 @@ public sealed class PlayerController : IDisposable
     {
         if (playlist.Songs.RemoveAll(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase)) > 0)
         {
+            playlist.Cloud?.Remove(path);
             PlaylistStore.Save(Playlists);
             RefreshPlaylistCounts();
             PlaylistsChanged?.Invoke();
         }
     }
 
-    /// <summary>The "[<id>]" suffix our downloads carry, or null for files that were imported by hand.</summary>
+    /// <summary>把已经从歌单里拿掉的在线条目的元数据也删掉，别让 playlists.json 越积越大。</summary>
+    private static void PruneCloudMetadata(Playlist playlist)
+    {
+        if (playlist.Cloud == null || playlist.Cloud.Count == 0) return;
+        var live = new HashSet<string>(playlist.Songs, StringComparer.OrdinalIgnoreCase);
+        foreach (var key in playlist.Cloud.Keys.Where(k => !live.Contains(k)).ToList())
+            playlist.Cloud.Remove(key);
+    }
+
+    /// <summary>
+    /// 把一首**在线**曲目加进歌单：只写 id + 元数据，**不下载**。用户要的就是这个 ——
+    /// 加歌是瞬时的，真要听的时候才联网取流（谱面/歌词也是那时才拉）。
+    /// 返回 1 = 新增，0 = 已经有了。
+    /// </summary>
+    public int AddCloudToPlaylist(Playlist playlist, Song song)
+    {
+        if (song.Source != SongSource.Netease || song.NeteaseId <= 0) return 0;
+        var entry = Playlist.CloudEntry(song.NeteaseId);
+        // 同一首已经以本地文件（或另一个条目）在歌单里，就不要再加一份。
+        if (playlist.Songs.Any(p => IdTag(p) == song.NeteaseId.ToString())) return 0;
+        playlist.Songs.Add(playlist.RememberCloud(new CloudTrack
+        {
+            Id = song.NeteaseId,
+            Title = song.DisplayTitle,
+            Artist = song.DisplayArtist == "未知歌手" ? "" : song.Artist,
+            Album = song.Album ?? "",
+            Seconds = song.Duration.TotalSeconds,
+            CoverUrl = song.CoverUrl,
+        }));
+        if (playlist.CoverImage == null) playlist.CoverImage = ResolvePlaylistCover(playlist);
+        PlaylistStore.Save(Playlists);
+        RefreshPlaylistCounts();
+        PlaylistsChanged?.Invoke();
+        RefreshActivePlaylistCover(playlist);
+        return 1;
+    }
+
+    /// <summary>The "[<id>]" suffix our downloads carry (or the "netease:<id>" entry itself), so a
+    /// downloaded file and a cloud entry of the same track are recognised as one song.</summary>
     private static string? IdTag(string path)
     {
         try
         {
+            if (Playlist.IsCloud(path))
+            {
+                var cloudId = Playlist.CloudId(path);
+                return cloudId > 0 ? cloudId.ToString() : null;
+            }
             var name = System.IO.Path.GetFileNameWithoutExtension(path);
             int open = name.LastIndexOf('[');
             int close = name.LastIndexOf(']');
@@ -395,7 +441,9 @@ public sealed class PlayerController : IDisposable
                 {
                     try
                     {
-                        if (File.Exists(path)) songs.Add(TagReader.Read(path));
+                        // 在线条目：id + 元数据就能渲染，断网也有歌名；播放时才联网取流。
+                        if (Playlist.IsCloud(path)) songs.Add(playlist.ToSong(path));
+                        else if (File.Exists(path)) songs.Add(TagReader.Read(path));
                     }
                     catch { }
                 }
