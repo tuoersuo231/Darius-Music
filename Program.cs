@@ -6237,7 +6237,7 @@ var settingsWindow = new SettingsWindow(settings, _ => { });
             for (int i = 0; i < 8; i++) Pump(app, 80);
             Save(spectrumWindow, Path.Combine(dir, "spectrum-color.png"));
             File.AppendAllText(Path.Combine(dir, "layout.txt"),
-                Environment.NewLine + "spectrum overlay: " + spectrumWindow.DebugSetOverlay(true) +
+                Environment.NewLine + "spectrum layer: " + spectrumWindow.DebugLayer() +
                 " parent=" + main.DebugSpectrumLayer());
             for (int i = 0; i < 10; i++) Pump(app, 80);
             Save(main, Path.Combine(dir, "spectrum-overlay.png"));

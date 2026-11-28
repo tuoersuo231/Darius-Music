@@ -109,17 +109,15 @@ public sealed class SpectrumSettings
     public bool Mirror { get; set; } = true;
 
     /// <summary>
-    /// 画在哪一层。
-    /// <c>overlay</c>（默认）= 浮在界面之上、贴住窗口底边，不参与布局，看得见但会盖住播放条那一条；
-    /// <c>backdrop</c> = 夹在壁纸和面板之间（真正的"UI 后层"），面板不透明时会被整块挡住，
-    /// 要把「界面外观 → 主题不透明度」降到 60% 左右才透得出来。
+    /// 画在哪一层。**1.3.16 起自动判断**，这个字段只剩"上次用的是哪层"的记录价值：
+    /// 面板本身够透（背景色带 alpha，或有背景图时面板自动变透）就夹在壁纸和面板之间，
+    /// 面板不透明就浮在界面之上 —— 否则夹在中间等于看不见（用户：关掉这个开关频谱就消失了）。
     /// </summary>
     public string Layer { get; set; } = "overlay";
 
-    /// <summary>Layer 是否等于 backdrop。</summary>
+    /// <summary>实际生效的层级，由 <see cref="SpectrumOptions.Backdrop"/> 决定（自动判断）。</summary>
     [JsonIgnore]
-    public bool IsBackdrop =>
-        string.Equals((Layer ?? "").Trim(), "backdrop", StringComparison.OrdinalIgnoreCase);
+    public bool IsBackdrop => SpectrumOptions.Backdrop;
 
     // ---------- 文件 ----------
 
@@ -183,7 +181,7 @@ public sealed class SpectrumSettings
         GhostAlpha = Math.Clamp(GhostAlpha <= 0 ? 70 : GhostAlpha, 0, 255);
         PeakThickness = double.IsNaN(PeakThickness) || PeakThickness < 1 ? 3 : Math.Min(16, PeakThickness);
         Steps = Math.Clamp(Steps, 0, 60);
-        Layer = IsBackdrop ? "backdrop" : "overlay";
+        // Layer 1.3.16 起只是"上次落在哪一层"的记录，层级由面板透明度自动判断，这里不再改写它。
         PanelSeeThrough = Math.Clamp(PanelSeeThrough, 0, 80);
 
         // 颜色和"最近用过"都规整成 6 位大写十六进制，去重、限长。
@@ -234,4 +232,10 @@ public sealed class SpectrumSettings
 public static class SpectrumOptions
 {
     public static SpectrumSettings Current { get; set; } = new();
+
+    /// <summary>
+    /// 频谱该夹在壁纸和面板之间吗？由 MainWindow.ApplyAppearance 按面板的实际透明度算出来：
+    /// 面板够透（plate 小于等于 216）→ true；面板不透明 → false（浮在界面之上，保证看得见）。
+    /// </summary>
+    public static bool Backdrop { get; set; }
 }

@@ -56,8 +56,6 @@ public partial class SpectrumWindow : Window
 
         BindSwitch(chkEnabled, () => _settings.Enabled, v => _settings.Enabled = v);
         BindSwitch(chkOwnAudio, () => _settings.OwnAudioOnly, v => _settings.OwnAudioOnly = v);
-        BindSwitch(chkOverlay, () => !_settings.IsBackdrop,
-            v => _settings.Layer = v ? "overlay" : "backdrop", placement: true);
         BindSwitch(chkAutoGain, () => _settings.AutoGain, v => _settings.AutoGain = v);
         BindSwitch(chkMirror, () => _settings.Mirror, v => _settings.Mirror = v);
         BindSwitch(chkGhost, () => _settings.Ghost, v => _settings.Ghost = v);
@@ -66,6 +64,9 @@ public partial class SpectrumWindow : Window
         txtColor.Text = _settings.Color;
         RebuildSwatches();
         _loading = false;
+        // 打开窗口时先按当前层级把「面板透出」的可用状态摆对（自动判断是只读的）。
+        sldSeeThrough.IsEnabled = SpectrumOptions.Backdrop;
+        sldSeeThrough.Opacity = SpectrumOptions.Backdrop ? 1 : 0.45;
         Closed += (_, _) =>
         {
             try { _settings.Write(); } catch { }
@@ -104,6 +105,9 @@ public partial class SpectrumWindow : Window
 
     private void Apply(bool placement)
     {
+        // 面板本来就不透明时频谱会浮在上面，「面板透出」这一项不起作用 —— 置灰，别让人拖了没反应。
+        sldSeeThrough.IsEnabled = SpectrumOptions.Backdrop;
+        sldSeeThrough.Opacity = SpectrumOptions.Backdrop ? 1 : 0.45;
         SpectrumView.RefreshAll();
         // 只有动了"层级"才需要重排窗口配色（面板透明度跟着层走），拖条不用。
         if (placement) _onChanged?.Invoke();
@@ -248,14 +252,11 @@ public partial class SpectrumWindow : Window
         return $"requested={value:0} applied={_settings.Height:0}";
     }
 
-    /// <summary>QA：切层级。</summary>
-    internal string DebugSetOverlay(bool overlay)
+    /// <summary>QA：报告当前自动判断出来的层级（1.3.16 起没有开关了）。</summary>
+    internal string DebugLayer()
     {
-        _loading = false;
-        chkOverlay.IsChecked = overlay;
-        _settings.Layer = overlay ? "overlay" : "backdrop";
-        Apply(placement: true);
-        return $"overlay={overlay} layer={_settings.Layer}";
+        Apply(placement: false);
+        return $"layer={(SpectrumOptions.Backdrop ? "backdrop" : "overlay")} see={_settings.PanelSeeThrough}";
     }
 
     /// <summary>QA：面板透出百分比。</summary>
