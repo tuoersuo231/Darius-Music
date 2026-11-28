@@ -2630,6 +2630,23 @@ public partial class MainWindow : Window
                 txtUpdateHint.Text = manifest.Version + " 可更新";
                 return;
             }
+            // 安装版（Inno Setup）：下载完整安装包 → 校验 → 静默安装，安装包自己拉起新版本。
+            if (!Services.AppPaths.IsPortable && !string.IsNullOrWhiteSpace(manifest.Setup))
+            {
+                if (!Services.UpdateService.VerifySetupSignature(manifest, Services.VersionStore.HmacKey()))
+                {
+                    txtUpdateHint.Text = "安装包清单签名不对，已放弃更新";
+                    return;
+                }
+                var setupProgress = new Progress<double>(p => txtUpdateHint.Text = $"下载安装包 {p * 100:0}%");
+                txtUpdateHint.Text = "下载安装包 0%";
+                var setup = await Services.UpdateService.FetchSetupAsync(feed, manifest, setupProgress);
+                txtUpdateHint.Text = "正在安装…";
+                Services.UpdateService.LaunchSetup(setup);
+                _forceExit = true;
+                Application.Current.Shutdown();
+                return;
+            }
             if (Services.VersionStore.Enabled)
             {
                 // 版本目录布局：只新增 versions\vX 并原子切指针，绝不覆盖正在运行的文件。

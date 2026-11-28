@@ -2,52 +2,62 @@ using System.IO;
 
 namespace CurrentLyrics.Services;
 
-/// <summary>Where the app keeps its own data (settings, cover cache, pulled WSA databases).
-/// Portable first: next to the executable, falling back to %APPDATA% when that folder is
-/// read-only.</summary>
+/// <summary>
+/// 用户数据放在哪。三种安装形态各有一套规则（1.3.18 起）：
+/// <list type="bullet">
+/// <item>老布局（根目录 + <c>versions\v*</c>）：数据在根目录的 <c>data\</c>，换版本不丢设置。</item>
+/// <item>绿色版 zip：exe 旁边有 <c>portable.txt</c> 才用 exe 旁边的 <c>data\</c>。</item>
+/// <item>正常安装（Inno Setup）：<c>%LocalAppData%\Darius Music\data</c> —— 和程序目录分开，
+/// 升级/卸载不跟程序文件打架，也不需要管理员权限。</item>
+/// </list>
+/// </summary>
 public static class AppPaths
 {
     public static string DataDir { get; } = Resolve();
 
+    private static readonly string LocalData =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Darius Music");
+
+    /// <summary>安装形态：只有 Inno 装出来的才有卸载项和固定目录；绿色版靠 portable.txt 判断。</summary>
+    public static bool IsPortable =>
+        !Services.Layout.IsVersioned && File.Exists(Path.Combine(AppContext.BaseDirectory, "portable.txt"));
+
     private static string Resolve()
     {
-        // QA / portable runs can point the data folder elsewhere so a screenshot pass never touches
-        // the settings the user is actually living with.
+        // QA / 便携模式可以用环境变量指到别处，截图测试永远不会碰到用户真实设置。
         var custom = Environment.GetEnvironmentVariable("DARIUS_DATA_DIR");
-        if (!string.IsNullOrWhiteSpace(custom))
-        {
-            try
-            {
-                Directory.CreateDirectory(custom);
-                return custom;
-            }
-            catch
-            {
-                // Fall through to the normal candidates.
-            }
-        }
-        foreach (var candidate in new[]
-                 {
-                     // 新版布局：data 永远在安装根目录，换版本（versions\v*）不会丢设置。
-                     Services.Layout.DataDir,
-                     Path.Combine(AppContext.BaseDirectory, "data"),
-                     Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "CurrentLyrics"),
-                     Path.Combine(Path.GetTempPath(), "CurrentLyrics"),
-                 })
-        {
-            try
-            {
-                Directory.CreateDirectory(candidate);
-                var probe = Path.Combine(candidate, ".write-test");
-                File.WriteAllText(probe, "ok");
-                File.Delete(probe);
-                return candidate;
-            }
-            catch
-            {
-                // Try the next location.
-            }
-        }
+        if (!string.IsNullOrWhiteSpace(custom) && Ensure(custom) is { } forced) return forced;
+
+        // 老布局：根目录的 data\（和以前完全一致，用户升级过来什么都不用搬）。
+        if (Services.Layout.IsVersioned && Ensure(Services.Layout.DataDir) is { } legacy) return legacy;
+
+        // 绿色版：只有显式放了 portable.txt 才把数据写在程序旁边。
+        if (File.Exists(Path.Combine(AppContext.BaseDirectory, "portable.txt")) &&
+            Ensure(Path.Combine(AppContext.BaseDirectory, "data")) is { } portable) return portable;
+
+        // 正常安装：%LocalAppData%\Darius Music\data。
+        if (Ensure(Path.Combine(LocalData, "data")) is { } installed) return installed;
+
+        // 兜底：临时目录里也得能跑起来。
+        if (Ensure(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Darius Music")) is { } roaming)
+            return roaming;
         return AppContext.BaseDirectory;
+    }
+
+    /// <summary>建目录并做一次写测试；不可写返回 null（调用方试下一个候选）。</summary>
+    private static string? Ensure(string path)
+    {
+        try
+        {
+            Directory.CreateDirectory(path);
+            var probe = Path.Combine(path, ".write-test");
+            File.WriteAllText(probe, "ok");
+            File.Delete(probe);
+            return path;
+        }
+        catch
+        {
+            return null;
+        }
     }
 }

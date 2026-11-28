@@ -23,6 +23,19 @@ public static class UpdateService
         /// <summary>对 "v|sha256" 的 HMAC-SHA256（hex）。缺失时只验 SHA256。</summary>
         public string? Sig { get; init; }
 
+        /// <summary>
+        /// 完整安装包（Inno Setup）。1.3.18 起**安装版**的自更新走这个：下载 → 校验 → 静默装。
+        /// 绿色版 zip 仍然用 <see cref="Package"/> 那套字段。
+        /// </summary>
+        public string? Setup { get; init; }
+
+        /// <summary>对 "v|setupSha256" 的 HMAC-SHA256（hex）。</summary>
+        public string? SetupSig { get; init; }
+
+        public string? SetupSha256 { get; init; }
+        public long? SetupSize { get; init; }
+        public string? SetupUrl { get; init; }
+
         /// <summary>用于比较和排序的整数。</summary>
         public int Number
         {
@@ -116,6 +129,26 @@ public static class UpdateService
             var message = Encoding.UTF8.GetBytes(manifest.Number + "|" + manifest.Sha256.ToLowerInvariant());
             var expected = Convert.ToHexString(mac.ComputeHash(message)).ToLowerInvariant();
             var actual = manifest.Sig.Trim().ToLowerInvariant();
+            return expected.Length == actual.Length &&
+                   CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(expected), Encoding.ASCII.GetBytes(actual));
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>完整安装包（Setup.exe）的签名：HMAC-SHA256(key, "v|setupSha256")。</summary>
+    public static bool VerifySetupSignature(Manifest manifest, string? keyText)
+    {
+        if (string.IsNullOrWhiteSpace(manifest.SetupSig)) return true;
+        if (string.IsNullOrWhiteSpace(keyText) || string.IsNullOrWhiteSpace(manifest.SetupSha256)) return false;
+        try
+        {
+            var mac = new HMACSHA256(DecodeKey(keyText));
+            var message = Encoding.UTF8.GetBytes(manifest.Number + "|" + manifest.SetupSha256.ToLowerInvariant());
+            var expected = Convert.ToHexString(mac.ComputeHash(message)).ToLowerInvariant();
+            var actual = manifest.SetupSig.Trim().ToLowerInvariant();
             return expected.Length == actual.Length &&
                    CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(expected), Encoding.ASCII.GetBytes(actual));
         }
@@ -238,7 +271,9 @@ public static class UpdateService
         {
             PropertyNameCaseInsensitive = true,
         });
-        if (manifest is { Version.Length: > 0, Package.Length: > 0 }) return manifest;
+        if (manifest is { Version.Length: > 0 } &&
+            (!string.IsNullOrEmpty(manifest.Package) || !string.IsNullOrWhiteSpace(manifest.Setup)))
+            return manifest;
         LastFailure = "latest.json 内容不完整";
         return null;
     }
@@ -320,6 +355,68 @@ public static class UpdateService
     /// 只复制 exe 是不够的：自包含包缺 runtime、框架依赖包缺 dll，单独一个 exe 根本起不来，
     /// 更新就会静默失败。复制完再让调用方退出。
     /// </summary>
+    /// <summary>
+    /// 下载完整安装包（Inno Setup）。安装版的自更新走这里：下载 → 校验 SHA256 → 静默运行。
+    /// </summary>
+    public static async Task<string> FetchSetupAsync(string feed, Manifest manifest, IProgress<double>? progress = null,
+                                                     CancellationToken token = default)
+    {
+        if (string.IsNullOrWhiteSpace(manifest.Setup) || string.IsNullOrWhiteSpace(manifest.SetupSha256))
+            throw new InvalidOperationException("清单里没有完整安装包");
+        var name = manifest.Setup!;
+        var expected = manifest.SetupSha256!.ToLowerInvariant();
+        Directory.CreateDirectory(StagingDir);
+        var target = Path.Combine(StagingDir, name);
+        if (File.Exists(target) && HashOf(target).Equals(expected, StringComparison.OrdinalIgnoreCase)) return target;
+
+        var source = !string.IsNullOrWhiteSpace(manifest.SetupUrl)
+            ? manifest.SetupUrl!
+            : Directory.Exists(feed)
+                ? Path.Combine(feed, name)
+                : feed.StartsWith("http", StringComparison.OrdinalIgnoreCase)
+                    ? feed.TrimEnd('/') + "/" + Uri.EscapeDataString(name)
+                    : Path.Combine(Path.GetDirectoryName(feed) ?? "", name);
+
+        if (source.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(30) };
+            using var response = await http.GetAsync(source, HttpCompletionOption.ResponseHeadersRead, token);
+            response.EnsureSuccessStatusCode();
+            var total = response.Content.Headers.ContentLength ?? manifest.SetupSize ?? 0;
+            await using var input = await response.Content.ReadAsStreamAsync(token);
+            await using var output = File.Create(target);
+            var buffer = new byte[81920];
+            long done = 0;
+            int read;
+            while ((read = await input.ReadAsync(buffer, token)) > 0)
+            {
+                await output.WriteAsync(buffer.AsMemory(0, read), token);
+                done += read;
+                if (total > 0) progress?.Report((double)done / total);
+            }
+        }
+        else
+        {
+            File.Copy(source, target, true);
+            progress?.Report(1);
+        }
+
+        var actual = HashOf(target);
+        if (!actual.Equals(expected, StringComparison.OrdinalIgnoreCase))
+        {
+            try { File.Delete(target); } catch { }
+            throw new InvalidDataException($"安装包 SHA256 不符：期望 {expected[..12]}…，实际 {actual[..12]}…");
+        }
+        return target;
+    }
+
+    /// <summary>静默跑安装包（Inno Setup 的参数），装完由安装包自己启动新版本。</summary>
+    public static void LaunchSetup(string setupPath, bool silent = true)
+    {
+        var args = silent ? "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /NOCANCEL" : "";
+        Process.Start(new ProcessStartInfo(setupPath, args) { UseShellExecute = true });
+    }
+
     public static void ApplyAndRestart(string zipPath)
     {
         var exe = Environment.ProcessPath ?? throw new InvalidOperationException("找不到自身路径");
